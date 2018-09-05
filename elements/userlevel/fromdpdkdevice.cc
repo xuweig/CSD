@@ -54,6 +54,7 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
     uint16_t mtu = 0;
     bool has_mac = false;
     bool has_mtu = false;
+    bool set_timestamp = false;
     FlowControlMode fc_mode(FC_UNSET);
 
     if (parse(Args(conf, this, errh)
@@ -61,7 +62,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
         .read("NDESC", ndesc)
         .read("MAC", mac).read_status(has_mac)
         .read("MTU", mtu).read_status(has_mtu)
-        .read("MAXQUEUES",maxqueues)
+        .read("MAXQUEUES", maxqueues)
+        .read("TIMESTAMP", set_timestamp)
         .read("PAUSE", fc_mode)
         .complete() < 0)
         return -1;
@@ -104,6 +106,11 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
     if (fc_mode != FC_UNSET)
         _dev->set_init_fc_mode(fc_mode);
 
+    if (set_timestamp) {
+        _dev->set_offload(DEV_RX_OFFLOAD_TIMESTAMP);
+        _set_timestamp = true;
+    }
+
     return 0;
 }
 
@@ -136,6 +143,14 @@ int FromDPDKDevice::initialize(ErrorHandler *errh)
     if (all_initialized()) {
         ret = DPDKDevice::initialize(errh);
         if (ret != 0) return ret;
+    }
+
+    if (_set_timestamp) {
+        struct timespec t;
+        int err;
+        if ((err = rte_eth_timesync_read_time(_dev->port_id, &t)) != 0) {
+            return errh->error("Device does not support queryig internal time ! Disable hardware timestamping. Error %d", err);
+        }
     }
 
     return ret;
@@ -187,6 +202,10 @@ bool FromDPDKDevice::run_task(Task *t)
 #endif
             if (_set_paint_anno) {
                 SET_PAINT_ANNO(p, iqueue);
+            }
+
+            if (_set_timestamp && (pkts[i]->ol_flags & PKT_RX_TIMESTAMP)) {
+                p->timestamp_anno().assignlong(pkts[i]->timestamp);
             }
 #if HAVE_BATCH
             if (head == NULL)
@@ -436,6 +455,12 @@ void FromDPDKDevice::add_handlers()
 }
 
 CLICK_ENDDECLS
+
+/*ELEMENT_STATIC_PARAMETER(FromDPDKDevice, TIMESTAMP, _set_timestamp)
+ELEMENT_STATIC_PARAMETER(FromDPDKDevice, RSS_AGGREGATE, _set_rss_aggregate)
+ELEMENT_STATIC_PARAMETER(FromDPDKDevice, PAINT_ANNO, _set_paint_anno)
+*/
+
 ELEMENT_REQUIRES(userlevel dpdk QueueDevice)
 EXPORT_ELEMENT(FromDPDKDevice)
 ELEMENT_MT_SAFE(FromDPDKDevice)

@@ -1,5 +1,5 @@
 /*
- * mbgclock.{cc,hh} -- Meinberg-based clock
+ * linuxclock.{cc,hh} -- Meinberg-based clock
  * Tom Barbette
  *
  * Copyright (c) 2017 University of Liege

@@ -24,10 +24,20 @@
 #include <click/master.hh>
 CLICK_DECLS
 
+
+inline uint64_t get_current_tick_tsc(TSCClock*) {
+    return click_get_cycles();
+}
+
+inline uint64_t get_tick_hz_tsc(TSCClock*) {
+    return cycles_hz();
+}
+
 TSCClock::TSCClock() :
 _verbose(1), _install(true), _nowait(false), _allow_offset(false),_correction_timer(this), _sync_timers(0), _base(0)
 {
-
+    _source.get_current_tick = &get_current_tick_tsc;
+    _source.get_tick_hz = &get_tick_hz_tsc;
 }
 
 void *
@@ -67,7 +77,7 @@ int64_t TSCClock::now(void* user, bool steady) {
 }
 
 /**
- * Return real current time
+ * Return real current time, without this element's approximation
  */
 inline int64_t TSCClock::get_real_timestamp(bool steady) {
     Timestamp t;
@@ -95,7 +105,7 @@ inline int64_t TSCClock::get_real_timestamp(bool steady) {
  */
 int
 TSCClock::initialize(ErrorHandler*) {
-    tsc_freq = cycles_hz();
+    tsc_freq = _source.get_tick_hz(this);
 
     int64_t mult;
     cycles_per_subsec_shift = 1;
@@ -119,7 +129,7 @@ TSCClock::initialize(ErrorHandler*) {
 
     //Initialize real clock
     last_timestamp[0] = get_real_timestamp();
-    last_cycles[0] = click_get_cycles();
+    last_cycles[0] = _source.get_current_tick(this);
 
     max_precision = 100 * (double)Timestamp::subsec_per_sec/(double)tsc_freq;
     //Need to converge quickly enough, but have a period large enough so that the cycle is still correct
@@ -140,7 +150,7 @@ TSCClock::initialize(ErrorHandler*) {
  * measured frequency to the base value until the final value is good enough.
  */
 bool TSCClock::stabilize_tick() {
-    int64_t cur_cycles = click_get_cycles();
+    int64_t cur_cycles = _source.get_current_tick(this);
     int64_t real_current_timestamp = get_real_timestamp();
 
     //Number of ticks during last period
@@ -200,7 +210,7 @@ bool TSCClock::accumulate_tick(Timer* t) {
 
     unsigned next_clock = (current_clock == 0? 1 : 0);
 
-    steady_cycle[next_clock] = click_get_cycles();
+    steady_cycle[next_clock] = _source.get_current_tick(this);
     steady_timestamp[next_clock] = steady_timestamp[current_clock] + tick_to_subsec_steady(steady_cycle[next_clock] - steady_cycle[current_clock]);
     //Check that the timer period was not too high, as this could cause TSC computation overflow in tick_to_subsec
     if ((steady_timestamp[next_clock] - steady_timestamp[current_clock]) > (update_period_subsec * 2)) {
@@ -220,7 +230,7 @@ bool TSCClock::accumulate_tick(Timer* t) {
     }
 
     //We want to always take current cycle as close as possible to real timestamp, so we read it again just before get real timestamp
-    int64_t cur_cycles = click_get_cycles();
+    int64_t cur_cycles = _source.get_current_tick(this);
     int64_t real_current_timestamp = get_real_timestamp();
 
     int64_t delta_tick = cur_cycles - last_cycles[current_clock];
@@ -268,7 +278,7 @@ bool TSCClock::accumulate_tick(Timer* t) {
      * function, to prevent jump we recompute the current approximated
      * time again and use that as a basis for next new frequency
      * multiplication.*/
-    last_cycles[next_clock] = click_get_cycles();
+    last_cycles[next_clock] = _source.get_current_tick(this);
     last_timestamp[next_clock] = last_timestamp[current_clock] + tick_to_subsec_wall(last_cycles[next_clock] - last_cycles[current_clock]);
 
     //Swap clock
@@ -344,11 +354,11 @@ void TSCClock::run_timer(Timer* timer) {
         if (stabilize_tick()) {
             //Initialize steady clock
             steady_timestamp[current_clock] = get_real_timestamp(true);
-            steady_cycle[current_clock] = click_get_cycles();
+            steady_cycle[current_clock] = _source.get_current_tick(this);
             steady_cycles_per_subsec_mult = cycles_per_subsec_mult[current_clock];
 
             //Initialize wall clock
-            last_cycles[current_clock] = click_get_cycles();
+            last_cycles[current_clock] = _source.get_current_tick(this);
             last_timestamp[current_clock] = get_real_timestamp(false);
 
             alpha = 0.5;
@@ -394,6 +404,20 @@ void TSCClock::run_timer(Timer* timer) {
     timer->schedule_after_msec(update_period_msec);
 }
 
+void
+TSCClock::push(int, Packet* p) {
+    unsigned clock = current_clock;
+    int64_t translated = last_timestamp[clock] + tick_to_subsec_wall(p->timestamp_anno().longval() + tstate->local_tsc_offset - last_cycles[clock]);
+    p->timestamp_anno().assignlong(translated);
+}
+
+#if HAVE_BATCH
+void TSCClock::push_batch(int port, PacketBatch* batch) {
+    FOR_EACH_PACKET(batch, p)
+        TSCClock::push(port, p);
+}
+#endif
+
 void TSCClock::cleanup(CleanupStage) {
     if (_sync_timers) {
         for (int i = 0; i < master()->nthreads(); i++)
@@ -411,7 +435,7 @@ TSCClock::read_handler(Element *e, void *thunk) {
         case h_now_steady:
             return String(c->compute_now_steady());
         case h_cycles:
-            return String(click_get_cycles() + c->tstate->local_tsc_offset);
+            return String(c->_source.get_current_tick(c) + c->tstate->local_tsc_offset);
         case h_cycles_hz:
             return String(c->tsc_freq);
         case h_phase:

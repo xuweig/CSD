@@ -1,11 +1,19 @@
 #ifndef CLICK_TSCCLOCK_HH
 #define CLICK_TSCCLOCK_HH
-#include <click/element.hh>
+#include <click/batchelement.hh>
 #include <click/timer.hh>
 #include <click/task.hh>
 #include <click/sync.hh>
 #include <click/timestamp.hh>
 CLICK_DECLS
+
+class TSCClock;
+
+struct source {
+    uint64_t (*get_current_tick)(TSCClock*);
+    uint64_t (*get_tick_hz)(TSCClock*);
+};
+
 
 /* =c
  * TSCClock()
@@ -23,12 +31,13 @@ CLICK_DECLS
  *
  */
 
-class TSCClock : public Element { public:
+class TSCClock : public BatchElement { public:
 
   TSCClock() CLICK_COLD;
 
   const char *class_name() const        { return "TSCClock"; }
-  const char *port_count() const        { return PORTS_0_0; }
+  const char *port_count() const        { return PORTS_1_1; }
+  const char *processing() const        { return PUSH; }
 
   void *cast(const char *name);
 
@@ -43,10 +52,14 @@ class TSCClock : public Element { public:
   static String read_handler(Element *e, void *thunk);
   void add_handlers() CLICK_COLD;
 
+  void push(int, Packet* p);
+#if HAVE_BATCH
+  void push_batch(int, PacketBatch* batch);
+#endif
 
   static int64_t now(void* user, bool steady);
 
-private:
+protected:
   int _verbose;
   bool _install;
   bool _nowait;
@@ -107,11 +120,11 @@ private:
   inline double delta_to_freq(int64_t tick, int64_t time);
 
   inline int64_t compute_now_steady() {
-      return steady_timestamp[current_clock] + tick_to_subsec_steady(click_get_cycles() + tstate->local_tsc_offset - steady_cycle[current_clock]);
+      return steady_timestamp[current_clock] + tick_to_subsec_steady(_source.get_current_tick(this) + tstate->local_tsc_offset - steady_cycle[current_clock]);
   }
 
   inline int64_t compute_now_wall(int clock) {
-      return last_timestamp[clock] + tick_to_subsec_wall(click_get_cycles() + tstate->local_tsc_offset- last_cycles[clock]);
+      return last_timestamp[clock] + tick_to_subsec_wall(_source.get_current_tick(this) + tstate->local_tsc_offset - last_cycles[clock]);
   }
 
   inline int64_t compute_now_wall() {
@@ -122,6 +135,8 @@ private:
   bool accumulate_tick(Timer*);
 
   int64_t get_real_timestamp(bool steady=false);
+
+  struct source _source;
 };
 
 inline int64_t TSCClock::tick_to_subsec(int64_t delta, int64_t mult) {
