@@ -1,5 +1,5 @@
 /*
- * recordtimestamp.{cc,hh} -- Store a packet count inside packet payload
+ * recordtimestamp.{cc,hh} -- Store a timestamp for numbered packets
  * Cyril Soldani, Tom Barbette
  *
  * Copyright (c) 2015-2016 University of Liège
@@ -18,25 +18,28 @@
 #include <click/config.h> // Doc says this should come first
 
 #include "recordtimestamp.hh"
-#include "numberpacket.hh"
 
 #include <click/args.hh>
 #include <click/error.hh>
 
 CLICK_DECLS
 
-RecordTimestamp::RecordTimestamp() : _offset(-1), _timestamps(), _dynamic(false) {
+RecordTimestamp::RecordTimestamp() :
+    _offset(-1), _dynamic(false), _net_order(false), _timestamps(), _np(0) {
 }
 
 RecordTimestamp::~RecordTimestamp() {
 }
 
 int RecordTimestamp::configure(Vector<String> &conf, ErrorHandler *errh) {
-    unsigned n = 0;
+    uint32_t n = 0;
+    Element *e = NULL;
     if (Args(conf, this, errh)
+            .read("COUNTER", e)
             .read("N", n)
             .read("OFFSET", _offset)
             .read("DYNAMIC", _dynamic)
+            .read("NET_ORDER", _net_order)
             .complete() < 0)
         return -1;
 
@@ -44,18 +47,26 @@ int RecordTimestamp::configure(Vector<String> &conf, ErrorHandler *errh) {
         n = 65536;
     _timestamps.reserve(n);
 
+    if (e && (_np = static_cast<NumberPacket *>(e->cast("NumberPacket"))) == 0)
+        return errh->error("COUNTER must be a valid NumberPacket element");
+
+    // Adhere to the settings of the counter element, bypassing the configuration
+    if (_np) {
+        _net_order = _np->has_net_order();
+    }
+
     return 0;
 }
 
 inline void
-RecordTimestamp::smaction(Packet* p) {
+RecordTimestamp::rmaction(Packet *p) {
     uint64_t i;
     if (_offset >= 0) {
-        i = NumberPacket::read_number_of_packet(p, _offset);
-        assert(i < INT_MAX);
-        while (i >= _timestamps.size()) {
-            if (!_dynamic && i >= _timestamps.capacity()) {
-                click_chatter("fatal error : DYNAMIC is not set and record timestamp reserved capacity is too small. Use N to augment the capacity.");
+        i = get_numberpacket(p, _offset, _net_order);
+        assert(i < ULLONG_MAX);
+        while (i >= (unsigned)_timestamps.size()) {
+            if (!_dynamic && i >= (unsigned)_timestamps.capacity()) {
+                click_chatter("Fatal error: DYNAMIC is not set and record timestamp reserved capacity is too small. Use N to augment the capacity.");
                 assert(false);
             }
             _timestamps.resize(_timestamps.size() == 0? _timestamps.capacity():_timestamps.size() * 2, Timestamp::uninitialized_t());
@@ -64,18 +75,17 @@ RecordTimestamp::smaction(Packet* p) {
     } else {
         _timestamps.push_back(Timestamp::now_steady());
     }
-
 }
 
 void RecordTimestamp::push(int, Packet *p) {
-    smaction(p);
+    rmaction(p);
     output(0).push(p);
 }
 
 #if HAVE_BATCH
 void RecordTimestamp::push_batch(int, PacketBatch *batch) {
     FOR_EACH_PACKET(batch, p) {
-        smaction(p);
+        rmaction(p);
     }
     output(0).push_batch(batch);
 }

@@ -30,7 +30,7 @@ ToDPDKRing::ToDPDKRing() :
     _blocking(false), _congestion_warning_printed(false),
     _dropped(0)
 {
-    _ndesc = DPDKDevice::DEF_RING_NDESC;
+
 }
 
 ToDPDKRing::~ToDPDKRing()
@@ -82,7 +82,8 @@ ToDPDKRing::initialize(ErrorHandler *errh)
     // If primary process, create the ring buffer and memory pool.
     // The primary process is responsible for managing the memory
     // and acting as a bridge to interconnect various secondary processes
-    if ( rte_eal_process_type() == RTE_PROC_PRIMARY ){
+    if (_force_create || (! _force_lookup && rte_eal_process_type() == RTE_PROC_PRIMARY)){
+
         _ring = rte_ring_create(
             _PROC_1.c_str(), DPDKDevice::RING_SIZE,
             rte_socket_id(), _flags
@@ -140,7 +141,7 @@ ToDPDKRing::run_timer(Timer *)
 }
 
 inline void
-ToDPDKRing::set_flush_timer(TXInternalQueue &iqueue)
+ToDPDKRing::set_flush_timer(DPDKDevice::TXInternalQueue &iqueue)
 {
     if ( _timeout >= 0 ) {
         if ( iqueue.timeout.scheduled() ) {
@@ -149,20 +150,21 @@ ToDPDKRing::set_flush_timer(TXInternalQueue &iqueue)
                 iqueue.timeout.unschedule();
         }
         else {
-            if ( iqueue.nr_pending > 0 )
+            if ( iqueue.nr_pending > 0 ) {
                 // Pending packets, set timeout to flush packets
                 // after a while even without burst
                 if ( _timeout == 0 )
                     iqueue.timeout.schedule_now();
                 else
                     iqueue.timeout.schedule_after_msec(_timeout);
+            }
         }
     }
 }
 
 /* Flush as many packets as possible from the internal queue of the DPDK ring. */
 void
-ToDPDKRing::flush_internal_tx_ring(TXInternalQueue &iqueue)
+ToDPDKRing::flush_internal_tx_ring(DPDKDevice::TXInternalQueue &iqueue)
 {
     unsigned n;
     unsigned sent = 0;
@@ -217,7 +219,7 @@ void
 ToDPDKRing::push(int, Packet *p)
 {
     // Get the internal queue
-    TXInternalQueue &iqueue = _iqueue;
+    DPDKDevice::TXInternalQueue &iqueue = _iqueue;
 
     bool congestioned;
     do {
@@ -277,7 +279,7 @@ void
 ToDPDKRing::push_batch(int, PacketBatch *head)
 {
     // Get the internal queue
-    TXInternalQueue &iqueue = _iqueue;
+    DPDKDevice::TXInternalQueue &iqueue = _iqueue;
 
     Packet *p    = head;
     Packet *next = NULL;

@@ -1,8 +1,10 @@
 /*
  * checknumberpacket.{cc,hh} -- Check number inside packet
  * Tom Barbette
+ * Support for network order numbering by Georgios Katsikas
  *
  * Copyright (c) 2015-2017 University of Liège
+ * Copyright (c) 2018 RISE SICS
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -17,15 +19,15 @@
 
 #include <click/config.h>
 
-#include "checknumberpacket.hh"
-
 #include <click/args.hh>
 #include <click/error.hh>
 #include <click/straccum.hh>
 
+#include "checknumberpacket.hh"
+
 CLICK_DECLS
 
-CheckNumberPacket::CheckNumberPacket() : _offset(40), _count(0) {
+CheckNumberPacket::CheckNumberPacket() : _offset(40), _net_order(false), _count(0) {
 }
 
 CheckNumberPacket::~CheckNumberPacket() {
@@ -34,23 +36,26 @@ CheckNumberPacket::~CheckNumberPacket() {
 int CheckNumberPacket::configure(Vector<String> &conf, ErrorHandler *errh) {
     if (Args(conf, this, errh)
         .read_p("OFFSET", _offset)
+        .read("NET_ORDER", _net_order)
         .read_p("COUNT", _count)
         .complete() < 0)
         return -1;
 
     if (_count > 0)
-        _numbers.resize(_count,0);
+        _numbers.resize(_count, 0);
     return 0;
 }
 
-inline int CheckNumberPacket::smaction(Packet* p) {
-    WritablePacket *wp = nullptr;
+inline int CheckNumberPacket::smaction(Packet *p) {
     if ((int)p->length() < _offset + 8) {
         return 1;
     }
-    uint64_t n = *reinterpret_cast<const uint64_t *>(p->data() + _offset);
-    if (n >= (uint64_t)_count) {
-        click_chatter("%p{element} : %lu out of scope (count is %d) !",this,n,_count);
+    uint64_t n = NumberPacket::read_number_of_packet(p, _offset, _net_order);
+    if (n >= _count) {
+        click_chatter(
+          "%p{element}: %" PRIu64 " out of scope (count is %" PRIu64 ") !",
+          this, n, _count
+        );
         return 1;
     } else {
         _numbers[n]++;
@@ -121,7 +126,7 @@ CheckNumberPacket::write_handler(const String &s_in, Element *e, void *thunk, Er
     String s = cp_uncomment(s_in);
     switch ((intptr_t)thunk) {
       case H_COUNT: {
-          int n;
+          uint64_t n;
           if (IntArg().parse(s, n)) {
               fd->_count = n;
               fd->_numbers.resize(n,0);

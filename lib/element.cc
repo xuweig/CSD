@@ -427,10 +427,11 @@ Element::Element()
     in_batch_mode(BATCH_MODE_NO),
 #endif
     receives_batch(false),
-#if HAVE_FULLPUSH_NONATOMIC
-    _is_fullpush(false),
-#endif
     _router(0), _eindex(-1)
+#if HAVE_FULLPUSH_NONATOMIC
+    ,_is_fullpush(false)
+#endif
+
 {
     nelements_allocated++;
     _ports[0] = _ports[1] = &_inline_ports[0];
@@ -1715,6 +1716,7 @@ public:
  *  threads of the queue, not the one before.
  */
 bool Element::get_spawning_threads(Bitvector& bmp, bool isoutput) {
+    (void)isoutput;
     unsigned int thisthread = home_thread_id();
 
     if (ninputs() > 0 && noutputs() > 0 && input_is_push(0) && output_is_pull(0)) {
@@ -1786,6 +1788,7 @@ bool Element::is_mt_safe() {
 }
 
 bool Element::do_mt_safe_check(ErrorHandler* errh) {
+    (void)errh;
     Bitvector bmp = get_passing_threads();
     int n = bmp.weight();
 	if (n == 0) {

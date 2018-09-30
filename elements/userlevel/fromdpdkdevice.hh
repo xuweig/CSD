@@ -37,7 +37,7 @@ you can pin to different thread using StaticThreadSched.
 
 Arguments:
 
-=over 8
+=over 20
 
 =item PORT
 
@@ -50,7 +50,8 @@ Integer.  A specific hardware queue to use. Default is 0.
 
 =item N_QUEUES
 
-Integer.  Number of hardware queues to use. -1 or default is to use as many queues as threads assigned to this element.
+Integer.  Number of hardware queues to use. -1 or default is to use as many queues
+as threads assigned to this element.
 
 =item PROMISC
 
@@ -79,14 +80,46 @@ to share the threads available on the device's NUMA node equally.
 
 Integer.  Number of descriptors per ring. The default is 256.
 
+=item MAC
+
+Colon-separated string. The device's MAC address.
+
+=item MTU
+
+Integer. The maximum transfer unit of the device.
+
+=item PAUSE
+
+String. Set the device pause mode. "full" to enable pause frame for both RX and TX, "rx" or "tx" to set one of them, and "none" to disable pause frames. Do not set or choose "unset" to keep device current state/default.
+
 =item ALLOW_NONEXISTENT
 
-Boolean.  Do not fail if the PORT do not existent. If it's the case the task
+Boolean.  Do not fail if the PORT does not exist. If it's the case the task
 will never run and this element will behave like Idle.
 
+=item RSS_AGGREGATE
+
+Boolean. If True, sets the RSS hash into the aggregate annotation
+field of each packet. Defaults to False.
+
+=item PAINT_QUEUE
+
+Boolean. If True, sets the hardware queue number into the paint annotation
+field of each packet. Defaults to False.
+
+=item NUMA
+
+Boolean. If True, allocates CPU cores in a NUMA-aware fashion.
+
 =item ACTIVE
+
 Boolean. If False, the device is only initialized. Use this when you want
 to read packet using secondary DPDK applications.
+
+=item VERBOSE
+
+Boolean. If True, more detailed messages about the device are printed to
+the stdout. Defaults to False.
 
 =back
 
@@ -106,6 +139,8 @@ Returns the number of packets read by the device.
 Resets "count" to zero.
 
 =a DPDKInfo, ToDPDKDevice */
+
+class ToDPDKDevice;
 
 class FromDPDKDevice : public RXQueueDevice {
 public:
@@ -129,15 +164,24 @@ public:
     
 private:
 
-    static String read_handler(Element*, void*) CLICK_COLD;
-    static int write_handler(const String&, Element*, void*, ErrorHandler*)
-        CLICK_COLD;
-    static String status_handler(Element *e, void * thunk) CLICK_COLD;
-    static String statistics_handler(Element *e, void * thunk) CLICK_COLD;
-    enum {h_carrier,h_duplex,h_autoneg,h_speed,h_ipackets,h_ibytes,h_ierrors,h_idropped,h_active,h_mac};
+    static String read_handler(Element *, void *) CLICK_COLD;
+    static int write_handler(
+        const String &, Element *, void *, ErrorHandler *
+    ) CLICK_COLD;
+    static String status_handler(Element *e, void *thunk) CLICK_COLD;
+    static String statistics_handler(Element *e, void *thunk) CLICK_COLD;
+    static int xstats_handler(int operation, String &input, Element *e,
+                              const Handler *handler, ErrorHandler *errh);
+    enum {
+        h_vendor, h_driver, h_carrier, h_duplex, h_autoneg, h_speed, h_type,
+        h_ipackets, h_ibytes, h_imissed, h_ierrors, h_nombufs,
+        h_active,
+        h_nb_rx_queues, h_nb_tx_queues, h_nb_vf_pools,
+        h_mac, h_add_mac, h_remove_mac, h_vf_mac,
+        h_device,
+    };
 
     DPDKDevice* _dev;
-    bool _active;
 };
 
 CLICK_ENDDECLS

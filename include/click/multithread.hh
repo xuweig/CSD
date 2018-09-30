@@ -9,6 +9,10 @@
 #include <click/machine.hh>
 #include <click/sync.hh>
 
+#if CLICK_LINUXMODULE
+# error This file is not meant for Kernel mode
+#endif
+
 CLICK_DECLS
 
 /*
@@ -151,51 +155,6 @@ public:
         return _size;
     }
 };
-
-#define PER_THREAD_SET(pt,value) \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        pt.set_value(i, value); \
-    }
-
-#define PER_THREAD_POINTER_SET(pt,member,value) \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        pt.get_value(i)->member = value; \
-    }
-
-#define PER_THREAD_MEMBER_SET(pt,member,value) \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        pt.get_value(i).member = value; \
-    }
-
-#define PER_THREAD_VECTOR_SET(pt,member,value) \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        for (int j = 0; j < pt.get_value(i).size(); j++) \
-            (pt.get_value(i))[j].member = value; \
-    }
-
-#define PER_THREAD_SUM(type, var, pt) \
-    type var = 0; \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        var += pt.get_value(i); \
-    }
-
-#define PER_THREAD_POINTER_SUM(type, var, pt, member) \
-    type var = 0; \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        var += pt.get_value(i)->member; \
-    }
-
-#define PER_THREAD_MEMBER_SUM(type, var, pt, member) \
-    type var = 0; \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        var += pt.get_value(i).member; \
-    }
-
-#define PER_THREAD_VECTOR_SUM(type, var, pt, index, member) \
-    type var = 0; \
-    for (unsigned i = 0; i < pt.weight(); i++) { \
-        var += pt.get_value(i)[index].member; \
-    }
 
 /**
  * Convenient class to have MP and non-MP version of the same thimg eg :
@@ -541,13 +500,8 @@ private:
  * Carefull : calling write_begin while read is held or vice versa will end up in deadlock
  */
 
-template <class V>
-class __rwlock { public:
-    __rwlock() : _v(){
-        _refcnt = 0;
-    }
-
-    __rwlock(V v) : _v(v) {
+class RWLock { public:
+    RWLock() {
         _refcnt = 0;
     }
 
@@ -569,6 +523,10 @@ class __rwlock { public:
 
     inline void write_begin() {
         while (_refcnt.compare_swap(0,-1) != 0) click_relax_fence();
+    }
+
+    inline bool write_attempt() {
+        return (_refcnt.compare_swap(0,-1) == 0);
     }
 
     /**
@@ -601,10 +559,24 @@ class __rwlock { public:
      * TLDR : if false, you have loosed your read lock and neither
      * acquired the write
      */
-    bool read_to_write() CLICK_WARN_UNUSED_RESULT;
+    inline bool read_to_write() CLICK_WARN_UNUSED_RESULT;
 
-    uint32_t refcnt() {
+    inline uint32_t refcnt() {
         return _refcnt;
+    }
+
+private:
+    atomic_uint32_t _refcnt;
+
+};
+
+
+template <class V>
+class __rwlock : public RWLock { public:
+    __rwlock() : _v(){
+    }
+
+    __rwlock(V v) : _v(v) {
     }
 
     V _v;
@@ -616,9 +588,6 @@ class __rwlock { public:
     V& operator*() {
         return _v;
     }
-
-private:
-    atomic_uint32_t _refcnt;
 };
 
 /**
@@ -631,12 +600,12 @@ private:
  * If max_writer is 1, this becomes rwlock, but with a priority on the reads
  */
 
-class rXwlock { public:
-    rXwlock() : max_write(-65535) {
+class rXwlockPR { public:
+    rXwlockPR() : max_write(-65535) {
         _refcnt = 0;
     }
 
-    rXwlock(int32_t max_writers) {
+    rXwlockPR(int32_t max_writers) {
         _refcnt = 0;
         set_max_writers(max_writers);
     }
@@ -703,6 +672,140 @@ class rXwlock { public:
 private:
     atomic_uint32_t _refcnt;
     int32_t max_write;
+} CLICK_CACHE_ALIGN;
+
+/**
+ * Read XOR Write lock. Allow either multiple reader or multiple
+ * writer. When a reader arrives, writers stop taking the usecount. The reader
+ * has access once all writer finish.
+ *
+ * To stop writer from locking, the reader will CAS a very low value.
+ *
+ * If max_writer is 1, this becomes rwlock, but with a priority on the reads
+ */
+
+class rXwlockPW { public:
+    rXwlockPW() : max_write(-65535) {
+        _refcnt = 0;
+    }
+
+    rXwlockPW(int32_t max_writers) {
+        _refcnt = 0;
+        set_max_writers(max_writers);
+    }
+
+    void set_max_writers(int32_t max_writers) {
+        assert(max_writers < 65535);
+        write_begin();
+        max_write = - max_writers;
+        write_end();
+    }
+
+    inline void write_begin() {
+        uint32_t current_refcnt;
+        do {
+            current_refcnt = _refcnt;
+            if (unlikely((int32_t)current_refcnt < 0)) {
+                if ((int32_t)current_refcnt <= -65536) {
+                    //Just wait for the other reader out there to win
+                } else {
+                    if (_refcnt.compare_swap(current_refcnt,current_refcnt - 65536) == current_refcnt) {
+                        //We could lower the value, so wait for it to reach -65536 (0 writer but one reader waiting) and continue
+                        do {
+                            click_relax_fence();
+                        } while((int32_t)_refcnt != -65536);
+                        //When it is -65536, driver cannot take it and reader are waiting, so we can set it directly
+                        _refcnt = 1;
+                        break;
+                    }
+                }
+            } else { // >= 0, just grab another reader (>0)
+                if (likely(_refcnt.compare_swap(current_refcnt,current_refcnt+1) == current_refcnt))
+                    break;
+            }
+            click_relax_fence();
+        } while (1);
+    }
+
+    inline void write_end() {
+        click_write_fence();
+        _refcnt--;
+    }
+
+    inline void write_get() {
+        _refcnt++;
+    }
+
+    inline void read_begin() {
+        uint32_t current_refcnt;
+        do {
+            current_refcnt = _refcnt;
+            if (likely((int32_t)current_refcnt <= 0 && (int32_t)current_refcnt > max_write)) {
+                if (_refcnt.compare_swap(current_refcnt,current_refcnt - 1) == current_refcnt)
+                    break;
+            }
+            click_relax_fence();
+        } while (1);
+    }
+
+    inline void read_end() {
+        click_read_fence();
+        _refcnt++;
+    }
+
+
+private:
+    atomic_uint32_t _refcnt;
+    int32_t max_write;
+} CLICK_CACHE_ALIGN;
+
+
+
+class rXwlock { public:
+    rXwlock() {
+        _refcnt = 0;
+    }
+
+    inline void read_begin() {
+        uint32_t current_refcnt;
+        current_refcnt = _refcnt;
+        while ((int32_t)current_refcnt < 0 || _refcnt.compare_swap(current_refcnt,current_refcnt+1) != current_refcnt) {
+            click_relax_fence();
+            current_refcnt = _refcnt;
+        }
+    }
+
+    void set_max_writers(int32_t max_writers) {
+        (void)max_writers;
+    }
+
+
+
+    inline void read_end() {
+        click_read_fence();
+        _refcnt--;
+    }
+
+    inline void read_get() {
+        _refcnt++;
+    }
+
+    inline void write_begin() {
+        uint32_t current_refcnt;
+        current_refcnt = _refcnt;
+        while ((int32_t)current_refcnt > 0 || _refcnt.compare_swap(current_refcnt,current_refcnt-1) != current_refcnt) {
+            click_relax_fence();
+            current_refcnt = _refcnt;
+        }
+    }
+
+    inline void write_end() {
+        click_write_fence();
+        _refcnt++;
+    }
+
+private:
+    atomic_uint32_t _refcnt;
 } CLICK_CACHE_ALIGN;
 
 
@@ -897,8 +1000,8 @@ private:
     __rwlock<V> _v;
 };
 
-template <typename V>
-bool __rwlock<V>::read_to_write() {
+inline bool
+RWLock::read_to_write() {
        /* Sadly, read_to_write is more complex than write_to_read,
         * because
         * two readers could want to become writer at the same time,
@@ -1080,10 +1183,10 @@ protected:
 template <typename T>
 class fast_rcu { public:
 #define N 2
-    fast_rcu() : _rcu_current(0), _write_epoch(1), _epochs(0) {
+    fast_rcu() : _rcu_current(0), _epochs(0), _write_epoch(1) {
     }
 
-    fast_rcu(T v) : _rcu_current(0), _write_epoch(1), _epochs(0) {
+    fast_rcu(T v) : _rcu_current(0), _epochs(0), _write_epoch(1){
         initialize(v);
     }
 
@@ -1123,7 +1226,7 @@ class fast_rcu { public:
         int rcu_next = (rcu_current_local + 1) & 1;
         int bad_epoch = (_write_epoch - N) + 1;
 
-        int i = 0;
+        unsigned i = 0;
         loop:
         for (; i < _epochs.weight(); i ++) {
             int te = _epochs.get_value(i);
@@ -1154,9 +1257,9 @@ protected:
         T v;
     } CLICK_CACHE_ALIGN AT;
 
+    volatile int _rcu_current;
     per_thread<volatile int> _epochs;
     AT _storage[2];
-    volatile int _rcu_current;
     volatile int _write_epoch;
     Spinlock _write_lock;
 

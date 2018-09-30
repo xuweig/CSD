@@ -1,9 +1,10 @@
 /*
- * dpdkdevice.{cc,hh} -- library for interfacing with Intel's DPDK
- * Cyril Soldani, Tom Barbette
+ * dpdkdevice.{cc,hh} -- library for interfacing with DPDK
+ * Cyril Soldani, Tom Barbette, Georgios Katsikas
  *
  * Copyright (c) 2014-2016 University of Liege
  * Copyright (c) 2016 Cisco Meraki
+ * Copyright (c) 2017 RISE SICS
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -17,8 +18,9 @@
  */
 
 #include <click/config.h>
-#include <click/dpdkdevice.hh>
 #include <click/element.hh>
+#include <click/dpdkdevice.hh>
+#include <click/userutils.hh>
 #include <rte_errno.h>
 
 CLICK_DECLS
@@ -26,15 +28,34 @@ CLICK_DECLS
 DPDKDevice::DPDKDevice() : port_id(-1), info() {
 }
 
-DPDKDevice::DPDKDevice(unsigned port_id) : port_id(port_id) {
+DPDKDevice::DPDKDevice(portid_t port_id) : port_id(port_id) {
 };
 
+uint16_t DPDKDevice::get_device_vendor_id()
+{
+    return info.vendor_id;
+}
+
+String DPDKDevice::get_device_vendor_name()
+{
+    return info.vendor_name;
+}
+
+uint16_t DPDKDevice::get_device_id()
+{
+    return info.device_id;
+}
+
+const char *DPDKDevice::get_device_driver()
+{
+    return info.driver;
+}
 
 /* Wraps rte_eth_dev_socket_id(), which may return -1 for valid ports when NUMA
  * is not well supported. This function will return 0 instead in that case. */
-int DPDKDevice::get_port_numa_node(unsigned port_id)
+int DPDKDevice::get_port_numa_node(portid_t port_id)
 {
-    if (port_id >= rte_eth_dev_count())
+    if (port_id >= dev_count())
         return -1;
     int numa_node = rte_eth_dev_socket_id(port_id);
     return (numa_node == -1) ? 0 : numa_node;
@@ -46,16 +67,20 @@ unsigned int DPDKDevice::get_nb_txdesc()
 }
 
 /**
- * This function is called by DPDK when Click run as a secondary process. It
- *     checks that the prefix match with the given config prefix and add it if it does so.
+ * This function is called by DPDK when Click runs as a secondary process.
+ * It checks that the prefix matches with the given config prefix and adds
+ * it if it does so.
  */
 #if RTE_VERSION >= RTE_VERSION_NUM(16,07,0,0)
-void add_pool(struct rte_mempool * rte, void *arg){
+void add_pool(struct rte_mempool *rte, void *arg){
 #else
-void add_pool(const struct rte_mempool * rte, void *arg){
+void add_pool(const struct rte_mempool *rte, void *arg){
 #endif
-    int* i = (int*)arg;
-    if (strncmp(DPDKDevice::MEMPOOL_PREFIX.c_str(), const_cast<struct rte_mempool *>(rte)->name, DPDKDevice::MEMPOOL_PREFIX.length()) != 0)
+    int *i = (int *) arg;
+    if (strncmp(
+            DPDKDevice::MEMPOOL_PREFIX.c_str(),
+            const_cast<struct rte_mempool *>(rte)->name,
+            DPDKDevice::MEMPOOL_PREFIX.length()) != 0)
         return;
     DPDKDevice::_pktmbuf_pools[*i] = const_cast<struct rte_mempool *>(rte);
     click_chatter("Found DPDK primary pool #%d %s",*i, DPDKDevice::_pktmbuf_pools[*i]->name);
@@ -67,13 +92,20 @@ int core_to_numa_node(unsigned lcore_id) {
        return (numa_node < 0) ? 0 : numa_node;
 }
 
-bool DPDKDevice::alloc_pktmbufs()
+int DPDKDevice::get_nb_mbuf(int socket) {
+    if (NB_MBUF.size() == 0)
+        return DEFAULT_NB_MBUF;
+    else
+        return NB_MBUF[socket % NB_MBUF.size()];
+}
+
+int DPDKDevice::alloc_pktmbufs(ErrorHandler* errh)
 {
     /* Count NUMA sockets for each device and each node, we do not want to
      * allocate a unused pool
      */
     int max_socket = -1;
-    for (HashTable<unsigned, DPDKDevice>::const_iterator it = _devs.begin();
+    for (HashTable<portid_t, DPDKDevice>::const_iterator it = _devs.begin();
          it != _devs.end(); ++it) {
         int numa_node = DPDKDevice::get_port_numa_node(it.key());
         if (numa_node > max_socket)
@@ -90,50 +122,111 @@ bool DPDKDevice::alloc_pktmbufs()
     if (max_socket == -1)
         max_socket = 0;
 
-    _nr_pktmbuf_pools = max_socket + 1;
+    unsigned n_pktmbuf_pools = max_socket + 1;
 
     // Allocate pktmbuf_pool array
     typedef struct rte_mempool *rte_mempool_p;
-    _pktmbuf_pools = new rte_mempool_p[_nr_pktmbuf_pools];
-    if (!_pktmbuf_pools)
-        return false;
-    memset(_pktmbuf_pools, 0, _nr_pktmbuf_pools * sizeof(rte_mempool_p));
+    if (_nr_pktmbuf_pools < n_pktmbuf_pools) {
+        auto pktmbuf_pools = new rte_mempool_p[n_pktmbuf_pools];
+        if (!pktmbuf_pools)
+            return false;
+        for (unsigned i = 0; i < _nr_pktmbuf_pools; i++) {
+            pktmbuf_pools[i] = _pktmbuf_pools[i];
+        }
+        if (_pktmbuf_pools)
+            delete[] _pktmbuf_pools;
+        for (unsigned i = _nr_pktmbuf_pools; i < n_pktmbuf_pools; i++) {
+            pktmbuf_pools[i] = 0;
+        }
+        _pktmbuf_pools = pktmbuf_pools;
+        _nr_pktmbuf_pools = n_pktmbuf_pools;
+    }
 
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
         // Create a pktmbuf pool for each active socket
-        for (int i = 0; i < _nr_pktmbuf_pools; i++) {
+        for (unsigned i = 0; i < _nr_pktmbuf_pools; i++) {
                 if (!_pktmbuf_pools[i]) {
-                        const char* name = (DPDKDevice::MEMPOOL_PREFIX + String(i)).c_str();
+                        String mempool_name = DPDKDevice::MEMPOOL_PREFIX + String(i);
+                        const char* name = mempool_name.c_str();
                         _pktmbuf_pools[i] =
 #if RTE_VERSION >= RTE_VERSION_NUM(2,2,0,0)
-                        rte_pktmbuf_pool_create(name, NB_MBUF,
+                        rte_pktmbuf_pool_create(name, get_nb_mbuf(i),
                                                 MBUF_CACHE_SIZE, 0, MBUF_DATA_SIZE, i);
 #else
                         rte_mempool_create(
-                                        name, NB_MBUF, MBUF_SIZE, MBUF_CACHE_SIZE,
+                                        name, get_nb_mbuf(i), MBUF_SIZE, MBUF_CACHE_SIZE,
                                         sizeof (struct rte_pktmbuf_pool_private),
                                         rte_pktmbuf_pool_init, NULL, rte_pktmbuf_init, NULL,
                                         i, 0);
 #endif
 
-                        if (!_pktmbuf_pools[i])
-                                return false;
+                        if (!_pktmbuf_pools[i]) {
+                                errh->error("Could not allocate packet MBuf pools %d with %d buffers : error %d (%s)",i, get_nb_mbuf(i), rte_errno,rte_strerror(rte_errno));
+                                return rte_errno;
+                        }
                 }
         }
     } else {
-                int i = 0;
-                rte_mempool_walk(add_pool,(void*)&i);
+        int i = 0;
+        rte_mempool_walk(add_pool,(void*)&i);
         if (i == 0) {
-                click_chatter("Could not get pools from the primary DPDK process");
-                return false;
+            return errh->error("Could not get pools from the primary DPDK process");
         }
     }
 
-    return true;
+    return 0;
 }
 
 struct rte_mempool *DPDKDevice::get_mpool(unsigned int socket_id) {
     return _pktmbuf_pools[socket_id];
+}
+
+/**
+ * Extracts from 'info' what is after the 'key'.
+ * E.g. an expected input is:
+ * XX:YY.Z Ethernet controller: Mellanox Technologies MT27700 Family [ConnectX-4]
+ * and we want to keep what is after our key 'Ethernet controller: '.
+ *
+ * @param info string to parse
+ * @param key substring to indicate the new index
+ * @return substring of info that succeeds the key
+ */
+static String parse_pci_info(String info, String key)
+{
+    String s;
+
+    // Extract what is after the keyword
+    s = info.substring(info.find_left(key) + key.length());
+    if (s.empty()) {
+        return String();
+    }
+
+    // Find the position of the delimiter
+    int pos = s.find_left(':') + 2;
+    if (pos < 0) {
+        return String();
+    }
+
+    // Extract what comes after the delimiter
+    s = s.substring(pos, s.find_left("\n") - pos);
+    if (s.empty()) {
+        return String();
+    }
+
+    return s;
+}
+
+/**
+ * Keeps the left-most substring of 'str'
+ * until the first occurence of the delimiter.
+ *
+ * @param str string to parse
+ * @param delimiter character that indicates where to stop
+ * @return substring of str that preceds the delimiter
+ */
+static String keep_token_left(String str, char delimiter)
+{
+    return str.substring(0, str.find_left(delimiter));
 }
 
 int DPDKDevice::initialize_device(ErrorHandler *errh)
@@ -144,25 +237,75 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
 
     rte_eth_dev_info_get(port_id, &dev_info);
 
+#if RTE_VERSION >= RTE_VERSION_NUM(17,11,0,0) && RTE_VERSION < RTE_VERSION_NUM(18,05,0,0)
+    if (strcmp(dev_info.driver_name,"net_mlx5") == 0) {
+        errh->warning("WARNING : DPDK 17.11 to 18.02 included have broken support for secondary process with mlx5. Use 18.05 with mlx5 cards if you use secondary process.");
+    }
+#endif
+
+#if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
+    dev_conf.rxmode.offloads = DEV_RX_OFFLOAD_CRC_STRIP;
+#endif
     dev_conf.rxmode.mq_mode = ETH_MQ_RX_RSS;
     dev_conf.rx_adv_conf.rss_conf.rss_key = NULL;
-    dev_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_IP | ETH_RSS_UDP | ETH_RSS_IP;
+    dev_conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_IP | ETH_RSS_UDP | ETH_RSS_TCP;
+    dev_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
+
+#if RTE_VERSION < RTE_VERSION_NUM(18,05,0,0)
+    // Obtain general device information
+    if (dev_info.pci_dev) {
+        info.vendor_id = dev_info.pci_dev->id.vendor_id;
+        info.device_id = dev_info.pci_dev->id.device_id;
+    }
+#else
+    //TODO
+#endif
+    info.driver = dev_info.driver_name;
+    info.vendor_name = "Unknown";
+
+    // Combine vendor and device IDs
+    char vendor_and_dev[10];
+    sprintf(vendor_and_dev, "%x:%x", info.vendor_id, info.device_id);
+
+    // Retrieve more information about the vendor of this NIC
+    String dev_pci = shell_command_output_string("lspci -d " + String(vendor_and_dev), "", errh);
+    String long_vendor_name = parse_pci_info(dev_pci, "Ethernet controller");
+    if (!long_vendor_name.empty()) {
+        info.vendor_name = keep_token_left(long_vendor_name, ' ');
+    }
 
     //We must open at least one queue per direction
     if (info.rx_queues.size() == 0) {
         info.rx_queues.resize(1);
-        info.n_rx_descs = DEF_DEV_RXDESC;
     }
     if (info.tx_queues.size() == 0) {
         info.tx_queues.resize(1);
-        info.n_tx_descs = DEF_DEV_TXDESC;
     }
 
+
+#if RTE_VERSION >= RTE_VERSION_NUM(18,05,0,0)
+    if (info.n_rx_descs == 0)
+        info.n_rx_descs = dev_info.default_rxportconf.ring_size > 0? dev_info.default_rxportconf.ring_size : DEF_DEV_RXDESC;
+
+    if (info.n_tx_descs == 0)
+        info.n_tx_descs = dev_info.default_txportconf.ring_size > 0? dev_info.default_txportconf.ring_size : DEF_DEV_TXDESC;
+#else
+    if (info.n_rx_descs == 0)
+        info.n_rx_descs = DEF_DEV_RXDESC;
+
+    if (info.n_tx_descs == 0)
+        info.n_tx_descs = DEF_DEV_TXDESC;
+#endif
+
     if (info.rx_queues.size() > dev_info.max_rx_queues) {
-        return errh->error("Port %d can only use %d RX queues, use MAXQUEUES to set the maximum number of queues or N_QUEUES to strictly define it.");
+        return errh->error("Port %d can only use %d RX queues (asked for %d), use MAXQUEUES to set the maximum "
+                           "number of queues or N_QUEUES to strictly define it.", port_id, dev_info.max_rx_queues, info.rx_queues.size());
     }
     if (info.tx_queues.size() > dev_info.max_tx_queues) {
-        return errh->error("Port %d can only use %d TX queues, use MAXQUEUES to set the maximum number of queues or N_QUEUES to strictly define it.");
+        return errh->error("Port %d can only use %d TX queues (FastClick asked for %d, probably to serve that same amount of threads).\n"
+                           "Add the argument \"MAXQUEUES %d\" to the corresponding ToDPDKDevice to set the maximum "
+                           "number of queues to %d or \"N_QUEUES %d\" to strictly define it. "
+                           "If the TX device has more threads than queues due to this parameter change, it will automatically rely on locking to share the queues as evenly as possible between the threads.", port_id, dev_info.max_tx_queues, info.tx_queues.size(), dev_info.max_tx_queues, dev_info.max_tx_queues, dev_info.max_tx_queues);
     }
 
     if (info.n_rx_descs < dev_info.rx_desc_lim.nb_min || info.n_rx_descs > dev_info.rx_desc_lim.nb_max) {
@@ -173,35 +316,77 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
         return errh->error("The number of transmit descriptors is %d but needs to be between %d and %d",info.n_tx_descs, dev_info.tx_desc_lim.nb_min, dev_info.tx_desc_lim.nb_max);
     }
 
+    /* TODO : Detect this if possible
+    if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+            dev_conf.txmode.offloads |=
+                DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+                */
+
     int ret;
-    if ((ret = rte_eth_dev_configure(port_id, info.rx_queues.size(), info.tx_queues.size(),
-                              &dev_conf)) < 0)
+    if ((ret = rte_eth_dev_configure(
+            port_id, info.rx_queues.size(),
+            info.tx_queues.size(), &dev_conf)) < 0)
         return errh->error(
-            "Cannot initialize DPDK port %u with %u RX and %u TX queues.\nError %d : %s",
-            port_id, info.rx_queues.size(), info.tx_queues.size(), ret,strerror(ret));
+            "Cannot initialize DPDK port %u with %u RX and %u TX queues\nError %d : %s",
+            port_id, info.rx_queues.size(), info.tx_queues.size(),
+            ret, strerror(ret));
+
+    rte_eth_dev_info_get(port_id, &dev_info);
+
+#if RTE_VERSION >= RTE_VERSION_NUM(16,07,0,0)
+    if (dev_info.nb_rx_queues != info.rx_queues.size()) {
+        return errh->error("Device only initialized %d RX queues instead of %d. "
+                "Please check configuration.", dev_info.nb_rx_queues,
+                info.rx_queues.size());
+    }
+    if (dev_info.nb_tx_queues != info.tx_queues.size()) {
+        return errh->error("Device only initialized %d TX queues instead of %d. "
+                "Please check configuration.", dev_info.nb_tx_queues,
+                info.tx_queues.size());
+    }
+#endif
+
     struct rte_eth_rxconf rx_conf;
 #if RTE_VERSION >= RTE_VERSION_NUM(2,0,0,0)
     memcpy(&rx_conf, &dev_info.default_rxconf, sizeof rx_conf);
 #else
     bzero(&rx_conf,sizeof rx_conf);
 #endif
+
+#if RTE_VERSION < RTE_VERSION_NUM(18,8,0,0)
     rx_conf.rx_thresh.pthresh = RX_PTHRESH;
     rx_conf.rx_thresh.hthresh = RX_HTHRESH;
     rx_conf.rx_thresh.wthresh = RX_WTHRESH;
+#endif
+
+#if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
+    rx_conf.offloads = dev_conf.rxmode.offloads;
+#endif
 
     struct rte_eth_txconf tx_conf;
+    tx_conf = dev_info.default_txconf;
 #if RTE_VERSION >= RTE_VERSION_NUM(2,0,0,0)
     memcpy(&tx_conf, &dev_info.default_txconf, sizeof tx_conf);
 #else
     bzero(&tx_conf,sizeof tx_conf);
 #endif
+
+#if RTE_VERSION < RTE_VERSION_NUM(18,8,0,0) && RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
+    tx_conf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
+#else
     tx_conf.tx_thresh.pthresh = TX_PTHRESH;
     tx_conf.tx_thresh.hthresh = TX_HTHRESH;
     tx_conf.tx_thresh.wthresh = TX_WTHRESH;
+#endif
+#if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,i0)
+    tx_conf.offloads = dev_conf.txmode.offloads;
+#endif
+#if RTE_VERSION <= RTE_VERSION_NUM(18,05,0,0)
     tx_conf.txq_flags |= ETH_TXQ_FLAGS_NOMULTSEGS | ETH_TXQ_FLAGS_NOOFFLOADS;
+#endif
 
     int numa_node = DPDKDevice::get_port_numa_node(port_id);
-    for (int i = 0; i < info.rx_queues.size(); ++i) {
+    for (unsigned i = 0; i < (unsigned)info.rx_queues.size(); ++i) {
         if (rte_eth_rx_queue_setup(
                 port_id, i, info.n_rx_descs, numa_node, &rx_conf,
                 _pktmbuf_pools[numa_node]) != 0)
@@ -210,12 +395,18 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
                 i, port_id, numa_node, rte_strerror(rte_errno));
     }
 
-    for (int i = 0; i < info.tx_queues.size(); ++i)
+    for (unsigned i = 0; i < (unsigned)info.tx_queues.size(); ++i)
         if (rte_eth_tx_queue_setup(port_id, i, info.n_tx_descs, numa_node,
                                    &tx_conf) != 0)
             return errh->error(
                 "Cannot initialize TX queue %u of port %u on node %u",
                 i, port_id, numa_node);
+
+    if (info.init_mtu != 0) {
+        if (rte_eth_dev_set_mtu(port_id, info.init_mtu) != 0) {
+            return errh->error("Could not set MTU %d",info.init_mtu);
+        }
+    }
 
     int err = rte_eth_dev_start(port_id);
     if (err < 0)
@@ -225,18 +416,60 @@ int DPDKDevice::initialize_device(ErrorHandler *errh)
     if (info.promisc)
         rte_eth_promiscuous_enable(port_id);
 
-    if (info.mac != EtherAddress()) {
+    if (info.init_mac != EtherAddress()) {
         struct ether_addr addr;
-        memcpy(&addr,info.mac.data(),sizeof(struct ether_addr));
-        rte_eth_dev_default_mac_addr_set(port_id, &addr);
+        memcpy(&addr,info.init_mac.data(),sizeof(struct ether_addr));
+        if (rte_eth_dev_default_mac_addr_set(port_id, &addr) != 0) {
+            return errh->error("Could not set default MAC address");
+        }
+    }
+
+    if (info.init_fc_mode != FC_UNSET) {
+        struct rte_eth_fc_conf conf;
+        ret = rte_eth_dev_flow_ctrl_get(port_id, &conf);
+        if (ret != 0)
+            return errh->error("Could not get flow control status !");
+        switch (info.init_fc_mode) {
+            case FC_FULL:
+                conf.mode = RTE_FC_FULL; break;
+            case FC_RX:
+                conf.mode = RTE_FC_RX_PAUSE; break;
+            case FC_TX:
+                conf.mode = RTE_FC_TX_PAUSE; break;
+            case FC_NONE:
+                conf.mode = RTE_FC_NONE; break;
+            default:
+                return errh->error("Unknown flow mode !");
+        }
+        ret = rte_eth_dev_flow_ctrl_set(port_id, &conf);
+        if (ret != 0)
+             return errh->error("Could not set flow control status !");
     }
 
     return 0;
 }
 
-void DPDKDevice::set_mac(EtherAddress mac) {
+void DPDKDevice::set_init_mac(EtherAddress mac) {
     assert(!_is_initialized);
-    info.mac = mac;
+    info.init_mac = mac;
+}
+
+void DPDKDevice::set_init_mtu(uint16_t mtu) {
+    assert(!_is_initialized);
+    info.init_mtu = mtu;
+}
+
+void DPDKDevice::set_init_fc_mode(FlowControlMode fc) {
+    assert(!_is_initialized);
+    info.init_fc_mode = fc;
+}
+
+
+EtherAddress DPDKDevice::get_mac() {
+    assert(_is_initialized);
+    struct ether_addr addr;
+    rte_eth_macaddr_get(port_id,&addr);
+    return EtherAddress((unsigned char*)&addr);
 }
 
 /**
@@ -245,17 +478,17 @@ void DPDKDevice::set_mac(EtherAddress mac) {
  * If v[id] is already true, this function return false. True if it is a
  *   new slot or if the existing slot was false.
  */
-bool set_slot(Vector<bool> &v, int &id) {
+bool set_slot(Vector<bool> &v, unsigned &id) {
     if (id <= 0) {
-        int i;
-        for (i = 0; i < v.size(); i ++) {
+        unsigned i;
+        for (i = 0; i < (unsigned)v.size(); i ++) {
             if (!v[i]) break;
         }
         id = i;
-        if (id >= v.size())
+        if (id >= (unsigned)v.size())
             v.resize(id + 1, false);
     }
-    if (id >= v.size()) {
+    if (id >= (unsigned)v.size()) {
         v.resize(id + 1,false);
     }
     if (v[id])
@@ -265,7 +498,7 @@ bool set_slot(Vector<bool> &v, int &id) {
 }
 
 int DPDKDevice::add_queue(DPDKDevice::Dir dir,
-                           int &queue_id, bool promisc, unsigned n_desc,
+                           unsigned &queue_id, bool promisc, unsigned n_desc,
                            ErrorHandler *errh)
 {
     if (_is_initialized) {
@@ -286,7 +519,7 @@ int DPDKDevice::add_queue(DPDKDevice::Dir dir,
                         "for device %u", port_id);
             info.n_rx_descs = n_desc;
         }
-        if (!set_slot(info.rx_queues,queue_id))
+        if (!set_slot(info.rx_queues, queue_id))
             return errh->error(
                         "Some elements are assigned to the same RX queue "
                         "for device %u", port_id);
@@ -307,20 +540,37 @@ int DPDKDevice::add_queue(DPDKDevice::Dir dir,
     return 0;
 }
 
-int DPDKDevice::add_rx_queue(int &queue_id, bool promisc,
+int DPDKDevice::add_rx_queue(unsigned &queue_id, bool promisc,
                               unsigned n_desc, ErrorHandler *errh)
 {
     return add_queue(DPDKDevice::RX, queue_id, promisc, n_desc, errh);
 }
 
-int DPDKDevice::add_tx_queue(int &queue_id, unsigned n_desc,
+int DPDKDevice::add_tx_queue(unsigned &queue_id, unsigned n_desc,
                               ErrorHandler *errh)
 {
     return add_queue(DPDKDevice::TX, queue_id, false, n_desc, errh);
 }
 
+int DPDKDevice::static_initialize(ErrorHandler* errh) {
+#if HAVE_DPDK_PACKET_POOL
+    if (!dpdk_enabled) {
+        return errh->error("You must start Click with --dpdk option when compiling with --enable-dpdk-pool");
+    }
+#endif
+    if (alloc_pktmbufs(errh)) {
+        if (rte_errno == 12) {
+            errh->error("Maybe try to allocate less buffers with DPDKInfo(X) or allocate more memory to DPDK by giving/increasing the -m parameter or allocate more hugepages.");
+        }
+        return -1;
+    }
+    return 0;
+}
+
 int DPDKDevice::initialize(ErrorHandler *errh)
 {
+    int err = 0;
+
     if (_is_initialized)
         return 0;
 
@@ -333,20 +583,20 @@ int DPDKDevice::initialize(ErrorHandler *errh)
         return errh->error("Cannot probe the PCI bus");
 #endif
 
-    const unsigned n_ports = rte_eth_dev_count();
-    if (n_ports == 0 && _devs.size() > 0)
+    if (dev_count() == 0 && _devs.size() > 0)
         return errh->error("No DPDK-enabled ethernet port found");
 
-    for (HashTable<unsigned, DPDKDevice>::const_iterator it = _devs.begin();
+    for (HashTable<portid_t, DPDKDevice>::const_iterator it = _devs.begin();
          it != _devs.end(); ++it)
-        if (it.key() >= n_ports)
+        if (it.key() >= dev_count())
             return errh->error("Cannot find DPDK port %u", it.key());
 
-    if (!alloc_pktmbufs())
-        return errh->error("Could not allocate packet MBuf pools : error %d (%s)",rte_errno,rte_strerror(rte_errno));
+    err = static_initialize(errh);
+    if (err != 0)
+        return err;
 
     if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
-        for (HashTable<unsigned, DPDKDevice>::iterator it = _devs.begin();
+        for (HashTable<portid_t, DPDKDevice>::iterator it = _devs.begin();
             it != _devs.end(); ++it) {
             int ret = it.value().initialize_device(errh);
             if (ret < 0)
@@ -365,11 +615,19 @@ void DPDKDevice::free_pkt(unsigned char *, size_t, void *pktmbuf)
 
 
 bool
-DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &ctx)
+DPDKDeviceArg::parse(
+    const String &str, DPDKDevice* &result, const ArgContext &ctx)
 {
-    int port_id;
+    portid_t port_id;
 
     if (!IntArg().parse(str, port_id)) {
+#if RTE_VERSION >= RTE_VERSION_NUM(18,05,0,0)
+       uint16_t id;
+       if (rte_eth_dev_get_port_by_name(str.c_str(), &id) != 0)
+           return false;
+       else
+           port_id = id;
+#else
        //Try parsing a ffff:ff:ff.f format. Code adapted from EtherAddressArg::parse
         unsigned data[4];
         int d = 0, p = 0;
@@ -384,7 +642,10 @@ DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &c
            else if (*s >= 'A' && *s <= 'F')
              digit = *s - 'A' + 10;
            else {
-             if (((*s == ':' && d < 2) || (*s == '.' && d == 2)) && (p == 1 || (d < 3 && p == 2) || (d == 0 && (p == 3 || p == 4))) && d < 3) {
+             if (((*s == ':' && d < 2) ||
+                (*s == '.' && d == 2)) &&
+                (p == 1 || (d < 3 && p == 2) || (d == 0 && (p == 3 || p == 4)))
+                && d < 3) {
                p = 0;
                ++d;
                continue;
@@ -392,7 +653,8 @@ DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &c
                break;
            }
 
-           if ((d == 0 && p == 4) || (d > 0 && p == 2) || (d == 3 && p == 1) || d == 4)
+           if ((d == 0 && p == 4) || (d > 0 && p == 2)||
+                (d == 3 && p == 1) || d == 4)
                break;
 
            data[d] = (p ? data[d] << 4 : 0) + digit;
@@ -404,11 +666,15 @@ DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &c
             return false;
         }
 
-        port_id = DPDKDevice::get_port_from_pci(data[0],data[1],data[2],data[3]);
+        port_id = DPDKDevice::get_port_from_pci(
+            data[0], data[1], data[2], data[3]
+        );
+#endif
     }
 
-    if (port_id >= 0 && port_id < rte_eth_dev_count())
+    if (port_id >= 0 && port_id < DPDKDevice::dev_count()) {
         result = DPDKDevice::get_device(port_id);
+    }
     else {
         ctx.error("Cannot resolve PCI address to DPDK device");
         return false;
@@ -417,10 +683,48 @@ DPDKDeviceArg::parse(const String &str, DPDKDevice* &result, const ArgContext &c
     return true;
 }
 
+
+bool
+FlowControlModeArg::parse(
+    const String &str, FlowControlMode &result, const ArgContext &ctx) {
+    str.lower();
+    if (str == "full") {
+        result = FC_FULL;
+    } else if (str == "rx") {
+        result = FC_RX;
+    }else if (str == "tx") {
+        result = FC_TX;
+    } else if (str == "none") {
+        result = FC_NONE;
+    } else
+        return false;
+
+    return true;
+}
+
+
+String
+FlowControlModeArg::unparse(FlowControlMode mode) {
+    switch(mode) {
+        case FC_FULL:
+            return "full";
+        case FC_RX:
+            return "rx";
+        case FC_TX:
+            return "tx";
+        case FC_NONE:
+            return "none";
+        case FC_UNSET:
+        default:
+            return "unset";
+    }
+}
+
+
 DPDKRing::DPDKRing() :
-    _message_pool(0),
-       _numa_zone(0), _burst_size(0), _flags(0), _ring(0),
-       _count(0), _MEM_POOL("") {
+    _message_pool(0), _MEM_POOL(""),
+    _burst_size(0),_numa_zone(0), _flags(0), _ring(0), _count(0),
+    _force_create(false), _force_lookup(false)  {
 }
 
 DPDKRing::~DPDKRing() {
@@ -445,6 +749,8 @@ DPDKRing::parse(Args* args) {
             .read("NUMA_ZONE",    _numa_zone)
             .read("SP_ENQ", spenq)
             .read("SC_DEQ", spdeq)
+            .read("FORCE_LOOKUP", _force_lookup)
+            .read("FORCE_CREATE", _force_create)
             .execute() < 0)
         return -1;
 
@@ -487,10 +793,15 @@ DPDKRing::parse(Args* args) {
 }
 
 #if HAVE_DPDK_PACKET_POOL
-int DPDKDevice::NB_MBUF = 32*4096*2; //Must be able to fill the packet data pool, and then have some packets for IO
+/**
+ * Must be able to fill the packet data pool,
+ * and then have some packets for I/O.
+ */
+int DPDKDevice::DEFAULT_NB_MBUF = 32*4096*2;
 #else
-int DPDKDevice::NB_MBUF = 65536;
+int DPDKDevice::DEFAULT_NB_MBUF = 65536;
 #endif
+Vector<int> DPDKDevice::NB_MBUF;
 #ifdef RTE_MBUF_DEFAULT_BUF_SIZE
 int DPDKDevice::MBUF_DATA_SIZE = RTE_MBUF_DEFAULT_BUF_SIZE;
 #else
@@ -518,9 +829,9 @@ unsigned DPDKDevice::RING_POOL_CACHE_SIZE = 32;
 unsigned DPDKDevice::RING_PRIV_DATA_SIZE  = 0;
 
 bool DPDKDevice::_is_initialized = false;
-HashTable<unsigned, DPDKDevice> DPDKDevice::_devs;
+HashTable<portid_t, DPDKDevice> DPDKDevice::_devs;
 struct rte_mempool** DPDKDevice::_pktmbuf_pools;
-int DPDKDevice::_nr_pktmbuf_pools;
+unsigned DPDKDevice::_nr_pktmbuf_pools;
 bool DPDKDevice::no_more_buffer_msg_printed = false;
 
 CLICK_ENDDECLS

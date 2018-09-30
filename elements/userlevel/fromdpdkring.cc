@@ -32,8 +32,6 @@ FromDPDKRing::FromDPDKRing() :
     #if HAVE_BATCH
         in_batch_mode = BATCH_MODE_YES;
     #endif
-
-    _ndesc = DPDKDevice::DEF_RING_NDESC;
 }
 
 FromDPDKRing::~FromDPDKRing()
@@ -76,7 +74,7 @@ FromDPDKRing::initialize(ErrorHandler *errh)
     // If primary process, create the ring buffer and memory pool.
     // The primary process is responsible for managing the memory
     // and acting as a bridge to interconnect various secondary processes
-    if ( rte_eal_process_type() == RTE_PROC_PRIMARY ){
+    if (_force_create || (!_force_lookup && rte_eal_process_type() == RTE_PROC_PRIMARY)){
         _ring = rte_ring_create(
             _PROC_1.c_str(), DPDKDevice::RING_SIZE,
             rte_socket_id(), _flags
@@ -90,7 +88,6 @@ FromDPDKRing::initialize(ErrorHandler *errh)
     _message_pool = rte_mempool_lookup(_MEM_POOL.c_str());
 
     if (!_message_pool) {
-        click_chatter("Creating %s",_MEM_POOL.c_str());
         _message_pool = rte_mempool_create(
             _MEM_POOL.c_str(), _ndesc,
             DPDKDevice::MBUF_DATA_SIZE,
@@ -132,6 +129,7 @@ FromDPDKRing::run_task(Task *t)
 #endif
 
     struct rte_mbuf *pkts[_burst_size];
+
 #if RTE_VERSION >= RTE_VERSION_NUM(17,5,0,0)
     int n = rte_ring_dequeue_burst(_ring, (void **)pkts, _burst_size, &avail);
 #else
@@ -148,8 +146,7 @@ FromDPDKRing::run_task(Task *t)
 
     #if CLICK_PACKET_USE_DPDK
         rte_prefetch0(rte_pktmbuf_mtod(pkts[i], void *));
-        WritablePacket *p = Packet::make(pkts[i]);
-
+        WritablePacket *p = static_cast<WritablePacket*>(Packet::make(pkts[i]));
     #elif HAVE_ZEROCOPY
         rte_prefetch0(rte_pktmbuf_mtod(pkts[i], void *));
         WritablePacket *p = Packet::make(

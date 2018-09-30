@@ -28,6 +28,7 @@
 #include <click/handlercall.hh>
 #include <click/packet_anno.hh>
 #include <click/userutils.hh>
+#include <clicknet/ether.h>
 #if CLICK_NS
 # include <click/master.hh>
 #endif
@@ -46,8 +47,11 @@ CLICK_DECLS
 #define	SWAPSHORT(y) \
 	( (((y)&0xff)<<8) | ((u_short)((y)&0xff00)>>8) )
 
+#define MIN_MTU 60
+#define MAX_MTU 9000
+
 FromDump::FromDump()
-    : _packet(0), _end_h(0), _count(0), _timer(this), _task(this), _preload_head(0)
+    : _packet(0), _end_h(0), _count(0), _timer(this), _task(this), _preload_head(0), _force_len(DISABLED)
 {
 }
 
@@ -78,6 +82,7 @@ FromDump::declaration() const
 int
 FromDump::configure(Vector<String> &conf, ErrorHandler *errh)
 {
+    int force_len = DISABLED;
     bool timing = false, stop = false, active = true, force_ip = false;
     Timestamp first_time, first_time_off, last_time, last_time_off, interval;
     HandlerCall end_h;
@@ -91,24 +96,25 @@ FromDump::configure(Vector<String> &conf, ErrorHandler *errh)
     if (_ff.configure_keywords(conf, this, errh) < 0)
 	return -1;
     if (Args(conf, this, errh)
-	.read_mp("FILENAME", FilenameArg(), _ff.filename())
-	.read_p("TIMING", timing)
-	.read("STOP", stop)
-	.read("ACTIVE", active)
-	.read("SAMPLE", FixedPointArg(SAMPLING_SHIFT), _sampling_prob)
-	.read("FORCE_IP", force_ip)
-	.read("START", first_time)
-	.read("START_AFTER", first_time_off)
-	.read("END", last_time)
-	.read("END_AFTER", last_time_off)
-	.read("INTERVAL", interval)
-	.read("END_CALL", HandlerCallArg(HandlerCall::writable), end_h)
+    .read_mp("FILENAME", FilenameArg(), _ff.filename())
+    .read_p("TIMING", timing)
+    .read("STOP", stop)
+    .read("ACTIVE", active)
+    .read("SAMPLE", FixedPointArg(SAMPLING_SHIFT), _sampling_prob)
+    .read("FORCE_IP", force_ip)
+    .read("FORCE_LEN", force_len)
+    .read("START", first_time)
+    .read("START_AFTER", first_time_off)
+    .read("END", last_time)
+    .read("END_AFTER", last_time_off)
+    .read("INTERVAL", interval)
+    .read("END_CALL", HandlerCallArg(HandlerCall::writable), end_h)
 #if CLICK_NS
-	.read("PER_NODE", per_node)
+    .read("PER_NODE", per_node)
 #endif
-	.read("FILEPOS", _packet_filepos)
-	.read("PRELOAD", _preload)
-	.complete() < 0)
+    .read("FILEPOS", _packet_filepos)
+    .read("PRELOAD", _preload)
+    .complete() < 0)
 	return -1;
 
     // check sampling rate
@@ -155,6 +161,31 @@ FromDump::configure(Vector<String> &conf, ErrorHandler *errh)
     _have_any_times = false;
     _timing = timing;
     _force_ip = force_ip;
+    _force_len = force_len;
+
+    if ((_force_len != DISABLED) && (_force_len != REAL_LEN) &&
+       ((_force_len < MIN_MTU) || (_force_len > MAX_MTU))) {
+        return errh->error("FORCE_LEN requires a valid frame size");
+    }
+
+    // User feedback regarding a potential frame length manipulation
+    if (_force_len == DISABLED) {
+        errh->warning(
+            "Frames will be loaded with their capture lengths; "
+            "this might cause issues when the length of the capture is different from the actual frame length. \n"
+            "Use Pad() to avoid frame drops, e.g., caused by a subsequent CheckIPHeader element."
+        );
+    } else if (_force_len == REAL_LEN) {
+        errh->warning(
+            "Frames will be loaded with their actual lengths; "
+            "this will likely slow down the injection rate due to frame padding/chopping operations."
+        );
+    } else {
+        errh->warning(
+            "Frames will be loaded with a fixed length of %d bytes; "
+            "this will likely slow down the injection rate due to frame padding/chopping operations.", _force_len
+        );
+    }
 
 #if CLICK_NS
     if (per_node) {
@@ -252,11 +283,12 @@ FromDump::initialize(ErrorHandler *errh)
 
     // if forcing IP packets, check datalink type to ensure we understand it
     if (_force_ip) {
-	if (!fake_pcap_dlt_force_ipable(_linktype))
-	    return _ff.error(errh, "unknown linktype %d; can't force IP packets", _linktype);
-    } else if (_linktype == FAKE_DLT_RAW)
-	// force FORCE_IP.
-	_force_ip = true;
+	   if (!fake_pcap_dlt_force_ipable(_linktype))
+	       return _ff.error(errh, "unknown linktype %d; can't force IP packets", _linktype);
+    } else if (_linktype == FAKE_DLT_RAW) {
+        // force FORCE_IP.
+        _force_ip = true;
+    }
 
     // maybe skip ahead in the file
     int result;
@@ -441,11 +473,80 @@ FromDump::read_packet(ErrorHandler *errh)
     p = _ff.get_packet(caplen, ts.sec(), ts.subsec(), errh);
     if (!p)
 	return false;
-    SET_EXTRA_LENGTH_ANNO(p, len - caplen);
+
+    // Adjust the packet length as requested by the user
+    if (_force_len != DISABLED) {
+        WritablePacket *q = 0;
+        int desired_len = -1;
+
+        // User asked for the real length of the packet.
+        // In the case of raw IP packets we reduce the length as they lack an Ethernet header
+        if (_force_len == REAL_LEN) {
+            desired_len = (_linktype == FAKE_DLT_RAW) ? (len - 14) : len;
+        // .. or a given legnth
+        } else {
+            desired_len = (_linktype == FAKE_DLT_RAW) ? (_force_len - 14) : _force_len;
+        }
+
+        // Need to enlarge the packet
+        if (desired_len > caplen) {
+            q = p->put(desired_len - caplen);
+        // Need to chop the packet
+        } else {
+            q = p->uniqueify();
+            q->take(caplen - desired_len);
+        }
+
+        if (!q) {
+            p->kill();
+            _packet = 0;
+            return false;
+        }
+
+        // Recompute the IP checksum
+        click_ip *ip = 0;
+        int offset = 0;
+        if (_linktype == FAKE_DLT_RAW) {
+            ip = reinterpret_cast<click_ip *>(q->data());
+        } else {
+            ip = reinterpret_cast<click_ip *>(q->data() + sizeof(click_ether));
+            offset = 14;
+        }
+
+        if (!ip) {
+            q->kill();
+            _packet = 0;
+            return false;
+        }
+
+        // Keep the old length for incremental IP checksum calculation
+        uint16_t len_old = ip->ip_len;
+
+        // Update the IP header
+        ip->ip_len = htons(q->length() - offset);
+        // and don't forget the checksum
+        if (len_old != ip->ip_len) {
+            click_update_in_cksum(&ip->ip_sum, len_old, ip->ip_len);
+        }
+
+        p = q;
+
+        SET_EXTRA_LENGTH_ANNO(p, len - desired_len);
+    } else {
+        SET_EXTRA_LENGTH_ANNO(p, len - caplen);
+    }
+
     _ff.shift_pos(skiplen);
 
-    p->set_mac_header(p->data());
+    // Raw IP case; Leave the link layer information out
+    if (_linktype == FAKE_DLT_RAW) {
+        p->set_network_header(p->data());
+    // Regular case; frames contain link layer info
+    } else {
+        p->set_mac_header(p->data());
+    }
     _packet = p;
+
     return true;
 }
 
@@ -509,7 +610,7 @@ FromDump::run_task(Task *)
 	_packet = 0;
 	return true;
     } else
-	return false;
+    return false;
 }
 
 Packet *

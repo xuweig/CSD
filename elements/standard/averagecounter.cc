@@ -27,6 +27,7 @@ CLICK_DECLS
 AverageCounter::AverageCounter()
 {
     _mp = false;
+    _link_fcs = true;
 }
 
 void
@@ -41,10 +42,21 @@ AverageCounter::reset()
 int
 AverageCounter::configure(Vector<String> &conf, ErrorHandler *errh)
 {
+#if HAVE_FLOAT_TYPES
   double ignore = 0;
-  if (Args(conf, this, errh).read_p("IGNORE", ignore).complete() < 0)
+#else
+  int ignore = 0;
+#endif
+  if (Args(conf, this, errh)
+          .read_p("IGNORE", ignore)
+          .read_p("LINK_FCS", _link_fcs)
+          .complete() < 0)
     return -1;
+#if HAVE_FLOAT_TYPES
+  _ignore = (double) ignore * CLICK_HZ;
+#else
   _ignore = ignore * CLICK_HZ;
+#endif
   return 0;
 }
 
@@ -90,7 +102,7 @@ AverageCounter::simple_action(Packet *p)
 uint64_t get_count(AverageCounter* c, int user_data) {
   switch(user_data) {
     case 3:
-      return (c->byte_count() * 8) + (c->count() * 12);
+      return (c->byte_count() + (c->count() * (20 + (c->_link_fcs?4:0) )) ) << 3;
     case 2:
       return c->byte_count() * 8;
     case 1:
@@ -117,13 +129,17 @@ averagecounter_read_rate_handler(Element *e, void *thunk)
   d -= c->ignore();
   if (d < 1) d = 1;
   uint64_t count = get_count(c, user_data);
-  if (user_data == 4) {
+
+#if CLICK_USERLEVEL
+  if (user_data == 4) { //time
       return String((double)d / CLICK_HZ);
   }
 
-#if CLICK_USERLEVEL
   return String(((double) count * CLICK_HZ) / d);
 #else
+  if (user_data == 4) { //time
+      return String(d / CLICK_HZ);
+  }
   uint32_t rate;
   if (count < (uint32_t) (0xFFFFFFFFU / CLICK_HZ))
       rate = (count * CLICK_HZ) / d;

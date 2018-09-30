@@ -51,6 +51,8 @@ class Packet { public:
 	default_headroom = 48,		///< Increase headroom for improved performance.
 #elif CLICK_PACKET_USE_DPDK || HAVE_DPDK_PACKET_POOL
 	default_headroom = RTE_PKTMBUF_HEADROOM,
+#elif HAVE_CLICK_PACKET_POOL
+	default_headroom = 64,
 #else
 	default_headroom = 28,		///< Default packet headroom() for
 					///  Packet::make().  4-byte aligned.
@@ -98,7 +100,13 @@ class Packet { public:
     inline bool shared_nonatomic() const;
     Packet *clone(bool fast = false) CLICK_WARN_UNUSED_RESULT;
     inline WritablePacket *uniqueify() CLICK_WARN_UNUSED_RESULT;
+#if CLICK_LINUXMODULE
+    inline void get() {skb_get(skb());};
+#elif CLICK_PACKET_USE_DPDK
+    inline void get() {rte_mbuf_refcnt_update(mb(), 1);};
+#else
     inline void get() {_use_count++;};
+#endif
 
     inline const unsigned char *data() const;
     inline const unsigned char *end_data() const;
@@ -124,13 +132,16 @@ class Packet { public:
         return reinterpret_cast<const struct rte_mbuf *>(this);
     }
     void *destructor_argument() const {
+        click_chatter("ILLEGAL CALL TO destructor_argument");
         assert(false);
         return NULL;
     }
     void set_buffer_destructor(buffer_destructor_type) {
+        click_chatter("ILLEGAL CALL TO set_buffer_destructor");
         assert(false);
     }
     void set_destructor_argument(void*) {
+        click_chatter("ILLEGAL CALL TO set_destructor_argument");
          assert(false);
     }
 #elif CLICK_BSDMODULE
@@ -709,7 +720,7 @@ class Packet { public:
 	*reinterpret_cast<click_aliasable_void_pointer_t *>(xanno()->c + i) = const_cast<void *>(x);
     }
 
-#if !CLICK_PACKET_USE_DPDK
+#if !CLICK_PACKET_USE_DPDK && !CLICK_LINUXMODULE
     inline Packet* data_packet() {
     	return _data_packet;
     }
@@ -895,7 +906,9 @@ class WritablePacket : public Packet { public:
     inline click_tcp *tcp_header() const;
     inline click_udp *udp_header() const;
 
+#if !CLICK_LINUXMODULE
     inline void set_buffer(unsigned char *data, uint32_t buffer_length, uint32_t data_length);
+#endif
 
 # if HAVE_CLICK_PACKET_POOL
     static PacketPool* make_local_packet_pool();
@@ -903,6 +916,7 @@ class WritablePacket : public Packet { public:
 
     static void pool_transfer(int from, int to);
 
+#if !CLICK_LINUXMODULE
     inline void set_buffer(unsigned char *data, uint32_t length) {
     	set_buffer(data,length,length);
     }
@@ -910,6 +924,7 @@ class WritablePacket : public Packet { public:
     inline void set_buffer(unsigned char *data) {
        	set_buffer(data,buffer_length());
     }
+#endif
 
     inline WritablePacket * unique_next() {
         if (!next()) return NULL;
@@ -993,6 +1008,8 @@ Packet::clear_annotations(bool all)
 	set_next(0);
 	set_prev(0);
     }
+#elif CLICK_PACKET_USE_DPDK
+    memset(all_anno(), 0, all ? sizeof(AllAnno) : sizeof(Anno));
 #else
     memset(&_aa, 0, all ? sizeof(AllAnno) : sizeof(Anno));
 #endif
@@ -1020,6 +1037,10 @@ Packet::copy_annotations(const Packet *p, bool)
 inline void
 WritablePacket::initialize()
 {
+#if CLICK_PACKET_USE_DPDK
+    click_chatter("UNIMPLEMENTED");
+    assert(false); //Should be initialized by DPDK
+#else
     _use_count = 1;
     _data_packet = 0;
 # if CLICK_USERLEVEL || CLICK_MINIOS
@@ -1027,13 +1048,20 @@ WritablePacket::initialize()
 # elif CLICK_BSDMODULE
     _m = 0;
 # endif
+#endif
     clear_annotations();
 }
 inline void
 WritablePacket::initialize_data()
 {
+#if CLICK_PACKET_USE_DPDK
+
+    click_chatter("UNIMPLEMENTED");
+    assert(false); //This may not illegal but I need to check what to be done
+#else
     _use_count = 1;
     _data_packet = 0;
+#endif
     clear_annotations(false);
 }
 #endif
@@ -2814,6 +2842,7 @@ WritablePacket::buffer_data() const
 }
 /** @endcond never */
 
+#if !CLICK_LINUXMODULE
 inline void
 WritablePacket::set_buffer(unsigned char *data, uint32_t buffer_length, uint32_t data_length) {
 # if CLICK_PACKET_USE_DPDK
@@ -2824,6 +2853,7 @@ WritablePacket::set_buffer(unsigned char *data, uint32_t buffer_length, uint32_t
 	_end = data + buffer_length;
 # endif
 }
+#endif
 
 typedef Packet::PacketType PacketType;
 

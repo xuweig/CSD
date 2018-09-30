@@ -56,13 +56,15 @@ template <typename T>
 class per_thread
 {
 private:
-    typedef struct {
+    struct A_t{
         T v;
-    } CLICK_CACHE_ALIGN AT;
+    } CLICK_CACHE_ALIGN;
+
+    typedef struct A_t AT;
 
     void initialize(unsigned int n, T v) {
         _size = n;
-        storage = new AT[_size];
+        storage = CLICK_ALIGNED_NEW(AT,_size);
         for (unsigned i = 0; i < n; i++) {
             storage[i].v = v;
         }
@@ -73,7 +75,7 @@ private:
 public:
     explicit per_thread() {
         _size = click_max_cpu_ids();
-        storage = new AT[_size];
+        storage = CLICK_ALIGNED_NEW(AT,_size);
     }
 
     explicit per_thread(T v) {
@@ -90,13 +92,13 @@ public:
      * This will destroy all data
      */
     void resize(unsigned int max_cpu_id, T v) {
-        delete[] storage;
+        CLICK_ALIGNED_DELETE(storage, AT, _size);
         initialize(max_cpu_id,v);
     }
 
     ~per_thread() {
         if (_size) {
-            delete[] storage;
+            CLICK_ALIGNED_DELETE(storage,AT,_size);
             _size = 0;
         }
     }
@@ -137,8 +139,8 @@ public:
     inline void operator=(const per_thread<T>& pt) {
         if (_size != pt._size) {
             if (storage)
-                delete[] storage;
-            storage = new AT[_size];
+               CLICK_ALIGNED_DELETE(storage,AT, _size);
+            storage = CLICK_ALIGNED_NEW(AT, _size);
         }
         for (int i = 0; i < pt.weight(); i++) {
             storage[i] = pt.storage[i];
@@ -155,6 +157,10 @@ public:
     }
 
     inline T& get() const{
+        return storage[click_current_cpu_id()].v;
+    }
+
+    inline const T& cst() const{
         return storage[click_current_cpu_id()].v;
     }
 
@@ -274,7 +280,16 @@ public:
         return &(v);
     }
 
+
     inline T& operator*() {
+        return v;
+    }
+
+    inline T& get() {
+        return v;
+    }
+
+    inline const T& cst() const {
         return v;
     }
 
@@ -340,6 +355,53 @@ public:
 private:
     T v;
 };
+
+
+#define PER_THREAD_SET(pt,value) \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        pt.set_value(i, value); \
+    }
+
+#define PER_THREAD_POINTER_SET(pt,member,value) \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        pt.get_value(i)->member = value; \
+    }
+
+#define PER_THREAD_MEMBER_SET(pt,member,value) \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        pt.get_value(i).member = value; \
+    }
+
+#define PER_THREAD_VECTOR_SET(pt,member,value) \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        for (int j = 0; j < pt.get_value(i).size(); j++) \
+            (pt.get_value(i))[j].member = value; \
+    }
+
+#define PER_THREAD_SUM(type, var, pt) \
+    type var = 0; \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        var += pt.get_value(i); \
+    }
+
+#define PER_THREAD_POINTER_SUM(type, var, pt, member) \
+    type var = 0; \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        var += pt.get_value(i)->member; \
+    }
+
+#define PER_THREAD_MEMBER_SUM(type, var, pt, member) \
+    type var = 0; \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        var += pt.get_value(i).member; \
+    }
+
+#define PER_THREAD_VECTOR_SUM(type, var, pt, index, member) \
+    type var = 0; \
+    for (unsigned i = 0; i < pt.weight(); i++) { \
+        var += pt.get_value(i)[index].member; \
+    }
+
 
 
 /** @file <click/sync.hh>
@@ -877,6 +939,27 @@ ReadWriteLock::release_write()
         _l.get_value(i).release();
 #endif
 }
+
+/**
+ * Fake lock
+ *
+ * Usefull for templating differently protected structure
+ */
+class nolock { public:
+    nolock() {}
+
+    inline void read_begin() {}
+
+    inline void read_end() {}
+
+    inline void read_get() {}
+
+    inline void write_begin() {}
+
+    inline void write_end() {}
+
+    inline void set_max_writers(int) {}
+};
 
 CLICK_ENDDECLS
 #undef SPINLOCK_ASSERTLEVEL

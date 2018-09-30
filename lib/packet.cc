@@ -31,6 +31,7 @@
 # include <unistd.h>
 #endif
 #if HAVE_DPDK
+# include <rte_malloc.h>
 # include <click/dpdkdevice.hh>
 #endif
 #if CLICK_PACKET_USE_DPDK
@@ -228,7 +229,7 @@ Packet::~Packet()
             _destructor(_head, _end - _head, _destructor_argument);
     } else
 #  if HAVE_NETMAP_PACKET_POOL
-    if (NetmapBufQ::is_valid_netmap_packet(this)) {
+    if (_head && NetmapBufQ::is_valid_netmap_packet(this)) {
         NetmapBufQ::local_pool()->insert_p(_head);
     } else
 #  endif
@@ -419,11 +420,11 @@ WritablePacket::pool_allocate(uint32_t headroom, uint32_t length,
         p->_data = p->_head + headroom;
         p->_tail = p->_data + length;
         p->_end = p->_head + CLICK_PACKET_POOL_BUFSIZ;
-#if HAVE_DPDK_PACKET_POOL || HAVE_NETMAP_PACKET_POOL
+#if HAVE_DPDK_PACKET_POOL
        buffer_destructor_type type = p->_destructor;
 #endif
         p->initialize();
-#if HAVE_DPDK_PACKET_POOL || HAVE_NETMAP_PACKET_POOL
+#if HAVE_DPDK_PACKET_POOL
         p->_destructor = type;
 #endif
     } else {
@@ -433,14 +434,6 @@ WritablePacket::pool_allocate(uint32_t headroom, uint32_t length,
     }
 
 	return p;
-}
-
-/**
- * Give a hint that some packets from one thread will switch to another thread
- */
-void WritablePacket::pool_transfer(int from, int to) {
-    (void)from;
-    (void)to;
 }
 
 inline void
@@ -511,7 +504,7 @@ inline bool WritablePacket::is_from_data_pool(WritablePacket *p) {
 #else
     if (likely(!p->_data_packet && p->_head && !p->_destructor)) {
 # if HAVE_NETMAP_PACKET_POOL
-        return true;
+        return NetmapBufQ::is_valid_netmap_packet(p);
 # else
         if (likely(p->_end - p->_head == CLICK_PACKET_POOL_BUFSIZ)) //Is standard buffer size?
             return true;
@@ -589,7 +582,6 @@ WritablePacket::recycle_data_batch(WritablePacket *head, Packet* tail, unsigned 
 
 # endif /* HAVE_CLICK_PACKET_POOL */
 
-
 inline bool
 Packet::alloc_data(uint32_t headroom, uint32_t length, uint32_t tailroom)
 {
@@ -614,11 +606,16 @@ Packet::alloc_data(uint32_t headroom, uint32_t length, uint32_t tailroom)
     d = NetmapBufQ::local_pool()->extract_p();
 #  endif
     } else {
-#if HAVE_DPDK_PACKET_POOL
+# if HAVE_DPDK_PACKET_POOL
         click_chatter("Warning : buffer of size %d bigger than DPDK buffer size", n);
-#endif
+# endif
     }
     if (!d) {
+# if HAVE_DPDK
+      if (dpdk_enabled)
+          d = (unsigned char*)rte_malloc(0, n, 64);
+      else
+# endif
       d = new unsigned char[n];
     }
     if (!d)
@@ -659,6 +656,16 @@ Packet::alloc_data(uint32_t headroom, uint32_t length, uint32_t tailroom)
 }
 
 #endif /* !CLICK_LINUXMODULE && !CLICK_PACKET_USE_DPDK */
+
+/**
+ * Give a hint that some packets from one thread will switch to another thread
+ */
+void WritablePacket::pool_transfer(int from, int to) {
+    (void)from;
+    (void)to;
+}
+
+
 
 
 /** @brief Create and return a new packet.
@@ -795,9 +802,14 @@ Packet::copy(Packet* p, int headroom)
 {
     if (headroom + p->length() > buffer_length())
         return false;
+#if CLICK_PACKET_USE_DPDK
+    click_chatter("UNIMPLEMENTED!");
+    assert(false);
+#else
     _data = _head + headroom;
     memcpy(_data,p->data(),p->length());
     _tail = _data + p->length();
+#endif
     copy_annotations(p);
     set_mac_header(p->mac_header() ? data() + p->mac_header_offset() : 0);
     set_network_header(p->network_header() ? data() + p->network_header_offset() : 0);
@@ -952,9 +964,7 @@ Packet::expensive_uniqueify(int32_t extra_headroom, int32_t extra_tailroom,
             kill();
         return 0;
     }
-    //rte_pktmbuf_headroom(nmb) = rte_pktmbuf_headroom(mb) + extra_headroom;
-    nmb->pkt.data = (unsigned char*)nmb->buf_addr + ((unsigned char*)mb->pkt.data - (unsigned char*)mb->buf_addr) + extra_headroom;
-
+    nmb->data_off = mb->data_off + extra_headroom;
 
     rte_pktmbuf_data_len(nmb) = length();
     rte_pktmbuf_pkt_len(nmb) = length();
@@ -965,7 +975,7 @@ Packet::expensive_uniqueify(int32_t extra_headroom, int32_t extra_tailroom,
 
     npkt->shift_header_annotations(buffer(), extra_headroom);
 
-    click_chatter("HEadroom %d %d",headroom(),npkt->headroom());
+    click_chatter("Headroom %d %d",headroom(),npkt->headroom());
     click_chatter("Tailroom %d %d",tailroom(),npkt->tailroom());
     click_chatter("Length %d %d",length(),npkt->length());
     click_chatter("Shared %d %d",shared(),npkt->shared());
@@ -1019,18 +1029,27 @@ Packet::expensive_uniqueify(int32_t extra_headroom, int32_t extra_tailroom,
     memcpy(p->_head + (extra_headroom >= 0 ? extra_headroom : 0), start_copy, end_copy - start_copy);
 
     // free old data
-    if (_data_packet)
+    if (_data_packet) {
       _data_packet->kill();
+    }
 # if CLICK_USERLEVEL || CLICK_MINIOS
     else if (_destructor) {
       _destructor(old_head, old_end - old_head, _destructor_argument);
-    } else
-      delete[] old_head;
+    } else {
+#  if HAVE_NETMAP_PACKET_POOL
+      if (NetmapBufQ::is_valid_netmap_buffer(old_head)) {
+        NetmapBufQ::local_pool()->insert_p(old_head);
+      } else
+#  endif
+      {
+        delete[] old_head;
+      }
+    }
 # if HAVE_DPDK_PACKET_POOL
-      p->_destructor = desc;
-      p->_destructor_argument = arg;
+    p->_destructor = desc;
+    p->_destructor_argument = arg;
 #  else
-      _destructor = 0;
+    _destructor = 0;
 # endif
 
 # elif CLICK_BSDMODULE
@@ -1244,7 +1263,12 @@ cleanup_pool(PacketPool *pp, int global)
 #elif HAVE_NETMAP_PACKET_POOL
     NetmapBufQ::local_pool()->insert_p(pd->buffer());
 #else
-	delete[] reinterpret_cast<unsigned char *>(pd->buffer());
+# if HAVE_DPDK
+    if (dpdk_enabled)
+        rte_free(reinterpret_cast<unsigned char *>(pd->buffer()));
+    else
+# endif
+        delete[] reinterpret_cast<unsigned char *>(pd->buffer());
 #endif
     ::operator delete((void *) pd);
     }
