@@ -7,13 +7,9 @@ CLICK_DECLS
 
 /*
 =c
-
 TCPRewriterIMP(INPUTSPEC1, ..., INPUTSPECn [, KEYWORDS])
-
 =s nat
-
 rewrites TCP packets' addresses, ports, and sequence numbers in a thread-independent way. See TCPRewriter for more informations.
-
 */
 
 class TCPRewriterIMP : public IPRewriterBaseIMP { public:
@@ -23,6 +19,7 @@ class TCPRewriterIMP : public IPRewriterBaseIMP { public:
 
     const char *class_name() const override	{ return "TCPRewriterIMP"; }
     void *cast(const char *) override;
+	Spinlock _lock;
 
     int configure(Vector<String> &, ErrorHandler *) override CLICK_COLD;
 
