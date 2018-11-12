@@ -86,16 +86,18 @@ IPRewriterEntry *
 UDPRewriterIMP::add_flow(int ip_p, const IPFlowID &flowid,
 		      const IPFlowID &rewritten_flowid, int input)
 {
+	
     void *data = _allocator->allocate();
     if (!data)
         return 0;
-
+	_lock.acquire();
     UDPFlow *flow = new(data) UDPFlow
 	((IPRewriterInput*)&input_specs(input), flowid, rewritten_flowid, ip_p,
 	 !!timeouts()[1], click_jiffies() +
          relevant_timeout(timeouts()));
-
-    return store_flow(flow, input, map());
+	IPRewriterEntry *m =store_flow(flow, input, map());
+	_lock.release();
+	return m;
 }
 
 int
