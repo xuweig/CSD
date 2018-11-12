@@ -78,6 +78,7 @@ class IPRewriterBaseIMP : public IPRewriterBaseAncestor { public:
     int initialize(ErrorHandler *errh) override CLICK_COLD;
     void add_rewriter_handlers(bool writable_patterns);
     void cleanup(CleanupStage) override CLICK_COLD;
+    Spinlock _lock;
 
     const IPRewriterHeapIMP *flow_heap() const {
     	return heap();
