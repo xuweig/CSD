@@ -19,7 +19,6 @@ class TCPRewriterIMP : public IPRewriterBaseIMP { public:
 
     const char *class_name() const override	{ return "TCPRewriterIMP"; }
     void *cast(const char *) override;
-	Spinlock _lock;
 
     int configure(Vector<String> &, ErrorHandler *) override CLICK_COLD;
 
