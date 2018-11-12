@@ -93,13 +93,15 @@ TCPRewriterIMP::add_flow(int /*ip_p*/, const IPFlowID &flowid,
     void *data;
     if (!(data = _allocator->allocate()))
 	return 0;
-
+	_lock.acquire();
     TCPFlow *flow = new(data) TCPFlow
 	((IPRewriterInput*)&input_specs(input), flowid, rewritten_flowid,
 	 !!timeouts()[1], click_jiffies() +
          relevant_timeout(timeouts()));
 
-    return store_flow(flow, input, map());
+    IPRewriterEntry *m = store_flow(flow, input, map());
+	_lock.release();
+	return m;
 }
 
 int
