@@ -280,11 +280,13 @@ IPRewriterBaseIMP::store_flow(IPRewriterFlow *flow, int input,
 	flow->ownerimp()->owner->destroy_flow(flow);
 	return 0;
     }
+	
+    _lock.acquire();
 
     IPRewriterEntry *old = map.set(&flow->entry(false));
     assert(!old);
 
-
+    
     if (!reply_map_ptr)
 	reply_map_ptr = &reply_element->map();
     old = reply_map_ptr->set(&flow->entry(true));
@@ -318,7 +320,10 @@ IPRewriterBaseIMP::store_flow(IPRewriterFlow *flow, int input,
 	map.rehash(map.bucket_count() + 1);
     if (reply_map_ptr != &map && reply_map_ptr->unbalanced())
 	reply_map_ptr->rehash(reply_map_ptr->bucket_count() + 1);
-    return &flow->entry(false);
+    IPRewriterEntry *m = &flow->entry(false);
+    _lock.release();
+	
+    return m;
 }
 
 void
