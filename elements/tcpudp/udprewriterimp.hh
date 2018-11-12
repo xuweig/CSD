@@ -39,7 +39,6 @@ class UDPRewriterIMP : public IPRewriterBaseIMP { public:
     void add_handlers() CLICK_COLD;
 
   private:
-	Spinlock _lock;
     per_thread<SizedHashAllocator<sizeof(UDPFlow)>> _allocator;
 
     unsigned _annos;
