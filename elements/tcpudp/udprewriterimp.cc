@@ -95,7 +95,8 @@ UDPRewriterIMP::add_flow(int ip_p, const IPFlowID &flowid,
 	((IPRewriterInput*)&input_specs(input), flowid, rewritten_flowid, ip_p,
 	 !!timeouts()[1], click_jiffies() +
          relevant_timeout(timeouts()));
-	IPRewriterEntry *m =store_flow(flow, input, map());
+	 IPRewriterEntry *m = map().get(flowid);
+	 m =store_flow(flow, input, map());
 	_lock.release();
 	return m;
 }
