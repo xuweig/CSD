@@ -98,10 +98,10 @@ TCPRewriterIMP::add_flow(int /*ip_p*/, const IPFlowID &flowid,
 	((IPRewriterInput*)&input_specs(input), flowid, rewritten_flowid,
 	 !!timeouts()[1], click_jiffies() +
          relevant_timeout(timeouts()));
-
-    IPRewriterEntry *m = store_flow(flow, input, map());
-	_lock.release();
-	return m;
+	 IPRewriterEntry *m = map().get(flowid);
+         m = store_flow(flow, input, map());
+	 _lock.release();
+	 return m;
 }
 
 int
