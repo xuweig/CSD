@@ -86,19 +86,16 @@ IPRewriterEntry *
 UDPRewriterIMP::add_flow(int ip_p, const IPFlowID &flowid,
 		      const IPFlowID &rewritten_flowid, int input)
 {
-	
     void *data = _allocator->allocate();
     if (!data)
         return 0;
-	_lock.acquire();
+
     UDPFlow *flow = new(data) UDPFlow
 	((IPRewriterInput*)&input_specs(input), flowid, rewritten_flowid, ip_p,
 	 !!timeouts()[1], click_jiffies() +
          relevant_timeout(timeouts()));
-	 IPRewriterEntry *m = map().get(flowid);
-	 m =store_flow(flow, input, map());
-	_lock.release();
-	return m;
+
+    return store_flow(flow, input, map());
 }
 
 int
@@ -124,6 +121,8 @@ UDPRewriterIMP::process(int port, Packet *p_in)
     }
 
     IPFlowID flowid(p);
+    
+    _lock.acquire();    // lock all parts access to table
     IPRewriterEntry *m = map().get(flowid);
 
     if (!m) {			// create new mapping
@@ -144,6 +143,7 @@ UDPRewriterIMP::process(int port, Packet *p_in)
 
     UDPFlow *mf = static_cast<UDPFlow *>(m->flowimp());
     mf->apply(p, m->direction(), _annos);
+    _lock.release();    // release lock
 
     click_jiffies_t now_j = click_jiffies();
     if (timeouts()[1])
