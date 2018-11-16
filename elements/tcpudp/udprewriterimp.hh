@@ -7,10 +7,16 @@ CLICK_DECLS
 
 /*
 =c
+
 UDPRewriterIMP(INPUTSPEC1, ..., INPUTSPECn [, I<keywords>])
+
 =s nat
+
 rewrites TCP/UDP packets' addresses and ports, independent multi processing
+
 see UDPRewriter
+
+
 =a UDPRewriter */
 
 class UDPRewriterIMP : public IPRewriterBaseIMP { public:
@@ -39,7 +45,6 @@ class UDPRewriterIMP : public IPRewriterBaseIMP { public:
     void add_handlers() CLICK_COLD;
 
   private:
-	Spinlock _lock;
     per_thread<SizedHashAllocator<sizeof(UDPFlow)>> _allocator;
 
     unsigned _annos;
@@ -55,6 +60,8 @@ class UDPRewriterIMP : public IPRewriterBaseIMP { public:
     }
 
     static String dump_mappings_handler(Element *, void *);
+    
+    static Spinlock _lock;   //declare lock as static
 
     friend class IPRewriter;
 
