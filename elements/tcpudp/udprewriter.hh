@@ -210,6 +210,7 @@ class UDPRewriter : public IPRewriterBase { public:
 
   private:
     per_thread<SizedHashAllocator<sizeof(UDPFlow)>> _allocator;
+    Spinlock _lock;
 
     unsigned _annos;
     uint32_t _udp_streaming_timeout;
