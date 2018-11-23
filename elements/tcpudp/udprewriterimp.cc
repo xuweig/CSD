@@ -122,7 +122,6 @@ UDPRewriterIMP::process(int port, Packet *p_in)
 
     IPFlowID flowid(p);
     
-    _lock.acquire();    // lock all parts access to table
     IPRewriterEntry *m = map().get(flowid);
 
     if (!m) {			// create new mapping
@@ -143,7 +142,6 @@ UDPRewriterIMP::process(int port, Packet *p_in)
 
     UDPFlow *mf = static_cast<UDPFlow *>(m->flowimp());
     mf->apply(p, m->direction(), _annos);
-    _lock.release();    // release lock
 
     click_jiffies_t now_j = click_jiffies();
     if (timeouts()[1])
