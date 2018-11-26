@@ -162,19 +162,16 @@ UDPRewriter::process(int port, Packet *p_in)
             return -1;
     }
 
-    _lock.acquire();
     IPFlowID flowid(p);
+    _lock.acquire();
     IPRewriterEntry *m = map().get(flowid);
-
     if (!m) {			// create new mapping
         IPRewriterInput &is = input_specs_unchecked(port);
         IPFlowID rewritten_flowid = IPFlowID::uninitialized_t();
 
         int result = is.rewrite_flowid(flowid, rewritten_flowid, p);
         if (result == rw_addmap) {
-        	_lock.release();
             m = UDPRewriter::add_flow(ip_p, flowid, rewritten_flowid, port);
-            _lock.acquire();
         }
 
         if (!m) {
@@ -183,7 +180,6 @@ UDPRewriter::process(int port, Packet *p_in)
             m->flowimp()->set_reply_anno(p->anno_u8(_annos >> 2));
         }
     }
-
     UDPFlow *mf = static_cast<UDPFlow *>(m->flowimp());
     mf->apply(p, m->direction(), _annos);
 
