@@ -246,6 +246,7 @@ IPRewriterEntry *
 IPRewriterBase::store_flow(IPRewriterFlow *flow, int input,
 			   Map &map, Map *reply_map_ptr)
 {
+	_lock.acquire();
     IPRewriterBase *reply_element = input_specs(input).reply_element();
     if ((unsigned) flow->entry(false).output() >= (unsigned) noutputs()
 	|| (unsigned) flow->entry(true).output() >= (unsigned) reply_element->noutputs()) {
@@ -289,7 +290,9 @@ IPRewriterBase::store_flow(IPRewriterFlow *flow, int input,
 	map.rehash(map.bucket_count() + 1);
     if (reply_map_ptr != &map && reply_map_ptr->unbalanced())
 	reply_map_ptr->rehash(reply_map_ptr->bucket_count() + 1);
-    return &flow->entry(false);
+    IPRewriterEntry *lo = &flow->entry(false);
+    _lock.release();
+    return lo;
 }
 
 void
