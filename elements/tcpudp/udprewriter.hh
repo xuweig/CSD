@@ -1,244 +1,332 @@
-#ifndef CLICK_UDPREWRITER_HH
-#define CLICK_UDPREWRITER_HH
-#include "elements/ip/iprewriterbase.hh"
-#include <click/sync.hh>
+// -*- mode: c++; c-basic-offset: 4 -*-
+#ifndef CLICK_IPREWRITERBASE_HH
+#define CLICK_IPREWRITERBASE_HH
+#include <click/timer.hh>
+#include "elements/ip/iprwmapping.hh"
+#include "elements/ip/iprwpattern.hh"
+#include <click/batchelement.hh>
+#include <click/bitvector.hh>
 CLICK_DECLS
+class IPMapper;
+class IPMapperIMP;
+class IPRewriterPattern;
+class IPRewriterBase;
+class IPMapperIMP;
+class IPRewriterPatternIMP;
+class IPRewriterBaseIMP;
 
-/*
-=c
+class IPRewriterInputAncestor {
+public:
+	IPRewriterInputAncestor() : foutput(-1),routput(-1),_reply_element(0) {
 
-UDPRewriter(INPUTSPEC1, ..., INPUTSPECn [, I<keywords>])
-
-=s nat
-
-rewrites TCP/UDP packets' addresses and ports
-
-=d
-
-Rewrites the source address, source port, destination address, and/or
-destination port on UDP packets, along with their checksums.  IPRewriter
-implements the functionality of a network address/port translator
-E<lparen>NAPT).  See also IPAddrRewriter and IPAddrPairRewriter, which
-implement Basic NAT, and TCPRewriter, which implements NAPT plus sequence
-number changes for TCP packets.
-
-Despite its name, UDPRewriter will validly rewrite both TCP and UDP.  However,
-in most uses, any given UDPRewriter will see packets of only one protocol.
-
-UDPRewriter maintains a I<mapping table> that records how packets are
-rewritten.  The mapping table is indexed by I<flow identifier>, the quadruple
-of source address, source port, destination address, and destination port.
-Each mapping contains a new flow identifier and an output port.  Input packets
-with the indexed flow identifier are rewritten to use the new flow identifier,
-then emitted on the output port.  A mapping is written as follows:
-
-    (SA, SP, DA, DP) => (SA', SP', DA', DP') [OUTPUT]
-
-When UDPRewriter receives a packet, it first looks up that packet in the
-mapping table by flow identifier.  If the table contains a mapping for the
-input packet, then the packet is rewritten according to the mapping and
-emitted on the specified output port (but see the CONSTRAIN_FLOW keyword
-argument).  If there was no mapping, the packet is handled by the INPUTSPEC
-corresponding to the input port on which the packet arrived.  (There are as
-many input ports as INPUTSPECs.)  Most INPUTSPECs install new mappings, so
-that future packets from the same TCP or UDP flow are handled by the mapping
-table rather than some INPUTSPEC.  The six forms of INPUTSPEC handle input
-packets as follows:
-
-=over 5
-
-=item 'drop' or 'discard'
-
-Discards input packets.
-
-=item 'pass OUTPUT'
-
-Sends input packets to output port OUTPUT.  No mappings are installed.
-
-=item 'keep FOUTPUT ROUTPUT'
-
-Installs mappings that preserve the input packet's flow ID.  Specifically,
-given an input packet with flow ID (SA, SP, DA, DP, PROTO), two mappings are
-installed:
-
-    (SA, SP, DA, DP, PROTO) => (SA, SP, DA, DP) [FOUTPUT]
-    (DA, DP, SA, SP, PROTO) => (DA, DP, SA, SP) [ROUTPUT]
-
-Thus, the input packet is emitted on output port FOUTPUT unchanged, and
-packets from the reply flow are emitted on output port ROUTPUT unchanged.
-
-Warning about multi-threading : this element is multi-thread safe, by
-duplicating mutable data structures per-thread. It also means that packets
-from the same flow must always be handled by the same thread. This is generally
-achieved by using RSS for input fanout.
-
-=item 'pattern SADDR SPORT DADDR DPORT FOUTPUT ROUTPUT'
-
-Creates a mapping according to the given pattern, 'SADDR SPORT DADDR DPORT'.
-Any pattern field may be a dash '-', in which case the packet's corresponding
-field is left unchanged.  For instance, the pattern '1.0.0.1 20 - -' will
-rewrite input packets' source address and port, but leave its destination
-address and port unchanged.  SPORT may be a port range 'L-H'; UDPRewriter will
-choose a source port in that range so that the resulting mappings don't
-conflict with any existing mappings.  The input packet's source port is
-preferred, if it is available; otherwise, a random port is chosen.  If no
-source port is available, the packet is dropped.  To allocate source ports
-sequentially (which can make testing easier), append a pound sign to the
-range, as in '1024-65535#'.  To choose a random port rather than preferring
-the source, append a '?'.
-
-Say a packet with flow IDnode041 (SA, SP, DA, DP, PROTO) is received, and the
-corresponding new flow ID is (SA', SP', DA', DP').  Then two mappings are
-installed:
-
-    (SA, SP, DA, DP, PROTO) => (SA', SP', DA', DP') [FOUTPUT]
-    (DA', DP', SA', SP', PROTO) => (DA, DP, SA, SP) [ROUTPUT]
-
-Thus, the input packet is rewritten and sent to FOUTPUT, and packets from the
-reply flow are rewritten to look like part of the original flow and sent to
-ROUTPUT.
-
-=item 'pattern PATNAME FOUTPUT ROUTPUT'
-
-Like 'pattern' above, but refers to named patterns defined by an
-IPRewriterPatterns element.
-
-=item 'ELEMENTNAME'
-
-Creates mappings according to instructions from the element ELEMENTNAME.  This
-element must implement the IPMapper interface.  One example mapper is
-RoundRobinIPMapper.
-
-=back
-
-UDPRewriter has no mappings when first initialized.
-
-Input packets must have their IP header annotations set.  Non-TCP and UDP
-packets, and second and subsequent fragments, are dropped unless they arrive
-on a 'pass' input port.  UDPRewriter changes IP packet data and, optionally,
-destination IP address annotations; see the DST_ANNO keyword argument below.
-
-Keyword arguments are:
-
-=over 5
-
-=item TIMEOUT I<time>
-
-Time out connections every I<time> seconds. Default is 5 minutes.
-
-=item STREAMING_TIMEOUT I<time>
-
-Timeout streaming connections every I<time> seconds. A "streaming"
-connection, in contrast to an "RPC-like" connection, comprises at least 3
-packets and at least one packet in each direction. Default is the TIMEOUT
-setting.
-
-=item GUARANTEE I<time>
-
-Preserve each connection mapping for at least I<time> seconds after each
-successfully processed packet. Defaults to 5 seconds. Incoming flows are
-dropped if a UDPRewriter's mapping table is full of guaranteed flows.
-
-=item REAP_INTERVAL I<time>
-
-Reap timed-out connections every I<time> seconds. Default is 15 minutes.
-
-=item MAPPING_CAPACITY I<capacity>
-
-Set the maximum number of mappings this rewriter can hold to I<capacity>.
-I<Capacity> can either be an integer or the name of another rewriter-like
-element, in which case this element will share the other element's capacity.
-
-=item DST_ANNO
-
-Boolean. If true, then set the destination IP address annotation on passing
-packets to the rewritten destination address. Default is true.
-
-=back
-
-=h table read-only
-
-Returns a human-readable description of the UDPRewriter's current mapping
-table.
-
-=a TCPRewriter, IPAddrRewriter, IPAddrPairRewriter, IPRewriterPatterns,
-RoundRobinIPMapper, FTPPortMapper, ICMPRewriter, ICMPPingRewriter */
-
-class UDPFlow : public IPRewriterFlow { public:
-
-	UDPFlow(IPRewriterInput *owner, const IPFlowID &flowid,
-		const IPFlowID &rewritten_flowid, int ip_p,
-		bool guaranteed, click_jiffies_t expiry_j)
-	    : IPRewriterFlow(owner, flowid, rewritten_flowid,
-			     ip_p, guaranteed, expiry_j) {
 	}
 
-	bool streaming() const {
-	    return _tflags > 6;
-	}
+	enum {
+		i_drop, i_nochange, i_keep, i_pattern, i_mapper
+	};
+	int foutput;
+	int routput;
+protected:
+	Element *_reply_element;
 
-	void apply(WritablePacket *p, bool direction, unsigned annos);
+};
 
+class IPRewriterInputBase : public IPRewriterInputAncestor { public:
+
+	union {
+		IPRewriterBase *owner;
+		IPRewriterBaseIMP *owner_imp;
+	};
+    int owner_input;
+    int kind;
+    IPRewriterBase* reply_element() {
+    	return (IPRewriterBase*)_reply_element;
+    }
+    void set_reply_element(IPRewriterBase* element) {
+    	_reply_element = (Element*)element;
+    }
+    uint32_t count;
+    uint32_t failures;
+    union {
+    	IPRewriterPattern *pattern;
+    	IPRewriterPatternIMP *pattern_imp;
+		IPMapper *mapper;
+		IPMapperIMP *mapper_imp;
+    } u;
+
+    IPRewriterInputBase()
+	: owner(0), owner_input(0), kind(i_drop),
+	   count(0), failures(0) {
+    	u.pattern = 0;
+    }
+
+    enum {
+    	mapid_default = 0, mapid_iprewriter_udp = 1
+    };
+
+};
+
+class IPRewriterInput : public IPRewriterInputBase { public:
+	inline int rewrite_flowid(const IPFlowID &flowid,
+					IPFlowID &rewritten_flowid,
+					Packet *p, int mapid = mapid_default);
 };
 
 
 
-class UDPRewriter : public IPRewriterBase { public:
+class IPRewriterHeap { public:
 
-    UDPRewriter() CLICK_COLD;
-    ~UDPRewriter() CLICK_COLD;
-
-    const char *class_name() const		{ return "UDPRewriter"; }
-    void *cast(const char *);
-
-    int configure(Vector<String> &, ErrorHandler *) CLICK_COLD;
-
-    IPRewriterEntry *add_flow(int ip_p, const IPFlowID &flowid,
-			      const IPFlowID &rewritten_flowid, int input) override;
-    void destroy_flow(IPRewriterFlow *flow) override;
-    click_jiffies_t best_effort_expiry(const IPRewriterFlow *flow) override {
-	return ((IPRewriterFlow*)flow)->expiry() + udp_flow_timeout(static_cast<const UDPFlow *>((IPRewriterFlow*)flow)) -
-               timeouts()[1];
+    IPRewriterHeap()
+	: _capacity(0x7FFFFFFF), _use_count(1) {
+    }
+    ~IPRewriterHeap() {
+	assert(size() == 0);
     }
 
-    void push(int, Packet *);
-#if HAVE_BATCH
-    void push_batch(int port, PacketBatch *batch);
-#endif
+    void use() {
+	++_use_count;
+    }
+    void unuse() {
+	assert(_use_count > 0);
+	if (--_use_count == 0)
+	    delete this;
+    }
 
-    void add_handlers() CLICK_COLD;
+    Vector<IPRewriterFlow *>::size_type size() const {
+	return _heaps[0].size() + _heaps[1].size();
+    }
+    int32_t capacity() const {
+	return _capacity;
+    }
 
   private:
-    per_thread<SizedHashAllocator<sizeof(UDPFlow)>> _allocator;
 
-    unsigned _annos;
-    uint32_t _udp_streaming_timeout;
+    enum {
+	h_best_effort = 0, h_guarantee = 1
+    };
+    Vector<IPRewriterFlow *> _heaps[2];
+    int32_t _capacity;
+    uint32_t _use_count;
 
-    int process(int port, Packet *p_in);
+    friend class IPRewriterBase;
+    friend class IPRewriterFlow;
 
-    int udp_flow_timeout(const UDPFlow *mf) const {
-	if (mf->streaming())
-	    return _udp_streaming_timeout;
-	else
-	    return timeouts()[0];
+};
+
+class IPRewriterBaseAncestor : public BatchElement { public:
+	IPRewriterBaseAncestor() CLICK_COLD;
+    ~IPRewriterBaseAncestor() CLICK_COLD;
+
+    typedef HashContainer<IPRewriterEntry> Map;
+    enum ConfigurePhase {
+	CONFIGURE_PHASE_PATTERNS = CONFIGURE_PHASE_INFO,
+	CONFIGURE_PHASE_REWRITER = CONFIGURE_PHASE_DEFAULT,
+	CONFIGURE_PHASE_MAPPER = CONFIGURE_PHASE_REWRITER - 1,
+	CONFIGURE_PHASE_USER = CONFIGURE_PHASE_REWRITER + 1
+    };
+
+    enum {
+    rw_drop = -1, rw_addmap = -2
+    };
+
+    const char *port_count() const	{ return "1-/1-"; }
+    const char *processing() const	{ return PUSH; }
+
+    int configure_phase() const		{ return CONFIGURE_PHASE_REWRITER; }
+
+    virtual click_jiffies_t best_effort_expiry(const IPRewriterFlow *flow) = 0;
+
+  protected:
+    bool _set_aggregate;
+};
+
+class IPRewriterBase : public IPRewriterBaseAncestor { public:
+
+    IPRewriterBase() CLICK_COLD;
+    ~IPRewriterBase() CLICK_COLD;
+
+    int configure(Vector<String> &conf, ErrorHandler *errh) CLICK_COLD;
+    int initialize(ErrorHandler *errh) CLICK_COLD;
+    void add_rewriter_handlers(bool writable_patterns);
+    void cleanup(CleanupStage) CLICK_COLD;
+
+    const IPRewriterHeap *flow_heap() const {
+	return _heap;
+    }
+    IPRewriterBase *reply_element(int input) const {
+    	return input_specs(input).reply_element();
+    }
+    virtual HashContainer<IPRewriterEntry> *get_map(int mapid) {
+	return likely(mapid == IPRewriterInput::mapid_default) ? &_map : 0;
     }
 
-    static String dump_mappings_handler(Element *, void *);
+    enum {
+	get_entry_check = -1, get_entry_reply = -2
+    };
+    virtual IPRewriterEntry *get_entry(int ip_p, const IPFlowID &flowid,
+				       int input);
+    virtual IPRewriterEntry *add_flow(int ip_p, const IPFlowID &flowid,
+				      const IPFlowID &rewritten_flowid,
+				      int input) = 0;
+    virtual void destroy_flow(IPRewriterFlow *flow) = 0;
+    virtual click_jiffies_t best_effort_expiry(const IPRewriterFlow *flow) {
+	return flow->expiry() + _timeouts[0] - _timeouts[1];
+    }
 
-    friend class IPRewriter;
+    int llrpc(unsigned command, void *data);
+
+  protected:
+    Spinlock _lock;
+
+    inline unsigned mem_units_no() {
+    	return 1;
+    }
+
+    inline Map& map() {
+    	return _map;
+    }
+
+    inline IPRewriterInput& input_specs(int input) const {
+    	return (IPRewriterInput&)_input_specs[input];
+    }
+
+    inline IPRewriterInput& input_specs_unchecked(int input) const {
+    	return (IPRewriterInput&)_input_specs.unchecked_at(input);
+    }
+
+    inline int input_specs_size() const {
+    	return _input_specs.size();
+    }
+
+    Vector<IPRewriterInput> _input_specs;
+
+
+    IPRewriterHeap*& heap() {
+    	return _heap;
+    }
+
+    uint32_t _timeouts[2];
+
+    inline const uint32_t* timeouts() const {
+    	return _timeouts;
+    }
+
+    void initialize_timeout(int idx, uint32_t val) {
+    	_timeouts[idx] = val;
+    }
+
+    uint32_t _gc_interval_sec;
+    Timer _gc_timer;
+
+    enum {
+	default_timeout = 300,	   // 5 minutes
+	default_guarantee = 5,	   // 5 seconds
+	default_gc_interval = 60 * 15 // 15 minutes
+    };
+
+    static uint32_t relevant_timeout(const uint32_t timeouts[2]) {
+	return timeouts[1] ? timeouts[1] : timeouts[0];
+    }
+
+    IPRewriterEntry *store_flow(IPRewriterFlow *flow, int input,
+				Map &map, Map *reply_map_ptr = 0);
+    inline void unmap_flow(IPRewriterFlow *flow,
+			   Map &map, Map *reply_map_ptr = 0);
+
+    static void gc_timer_hook(Timer *t, void *user_data);
+
+    int parse_input_spec(const String &str, IPRewriterInput &is,
+			 int input_number, ErrorHandler *errh);
+
+    enum {			// < 0 because individual patterns are >= 0
+	h_nmappings = -1, h_mapping_failures = -2, h_patterns = -3,
+	h_size = -4, h_capacity = -5, h_clear = -6
+    };
+    static String read_handler(Element *e, void *user_data) CLICK_COLD;
+    static int write_handler(const String &str, Element *e, void *user_data, ErrorHandler *errh) CLICK_COLD;
+    static int pattern_write_handler(const String &str, Element *e, void *user_data, ErrorHandler *errh) CLICK_COLD;
+
+    friend int IPRewriterInput::rewrite_flowid(const IPFlowID &flowid,
+			IPFlowID &rewritten_flowid, Packet *p, int mapid);
+
+  private:
+
+    Map _map;
+    IPRewriterHeap *_heap;
+
+    void shift_heap_best_effort(click_jiffies_t now_j);
+    bool shrink_heap_for_new_flow(IPRewriterFlow *flow, click_jiffies_t now_j);
+    void shrink_heap(bool clear_all);
+
+    friend class IPRewriterFlow;
 
 };
 
 
-inline void
-UDPRewriter::destroy_flow(IPRewriterFlow *flow)
+
+class IPMapper { public:
+
+    IPMapper()				{ }
+    virtual ~IPMapper()			{ }
+
+    virtual void notify_rewriter(IPRewriterBaseAncestor *user, IPRewriterInput *input,
+				 ErrorHandler *errh);
+    virtual int rewrite_flowid(IPRewriterInputAncestor *input,
+			       const IPFlowID &flowid,
+			       IPFlowID &rewritten_flowid,
+			       Packet *p, int mapid);
+
+};
+
+
+inline int
+IPRewriterInput::rewrite_flowid(const IPFlowID &flowid,
+				IPFlowID &rewritten_flowid,
+				Packet *p, int mapid)
 {
-    unmap_flow(flow, map());
-    flow->~IPRewriterFlow();
-    _allocator->deallocate(flow);
+    int i;
+    switch (kind) {
+    case i_nochange:
+	return foutput;
+    case i_keep:
+	rewritten_flowid = flowid;
+	return IPRewriterBase::rw_addmap;
+    case i_pattern: {
+	HashContainer<IPRewriterEntry> *reply_map;
+	if (likely(mapid == mapid_default))
+	    reply_map = &reply_element()->_map;
+	else
+	    reply_map = reply_element()->get_map(mapid);
+	i = u.pattern->rewrite_flowid(flowid, rewritten_flowid, *reply_map);
+	goto check_for_failure;
+    }
+    case i_mapper:
+	i = u.mapper->rewrite_flowid(this, flowid, rewritten_flowid, p, mapid);
+	goto check_for_failure;
+    check_for_failure:
+	if (i == IPRewriterBase::rw_drop)
+	    ++failures;
+	return i;
+    default:
+	return IPRewriterBase::rw_drop;
+    }
 }
 
 
+inline void
+IPRewriterBase::unmap_flow(IPRewriterFlow *flow, Map &map,
+			   Map *reply_map_ptr)
+{
+    //click_chatter("kill %s", hashkey().s().c_str());
+    if (!reply_map_ptr)
+	reply_map_ptr = &flow->owner()->reply_element()->_map;
+    Map::iterator it = map.find(flow->entry(0).hashkey());
+    if (it.get() == &flow->entry(0))
+	map.erase(it);
+    it = reply_map_ptr->find(flow->entry(1).hashkey());
+    if (it.get() == &flow->entry(1))
+	reply_map_ptr->erase(it);
+}
 
 CLICK_ENDDECLS
 #endif
