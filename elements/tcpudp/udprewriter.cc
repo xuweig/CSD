@@ -153,7 +153,9 @@ UDPRewriter::process(int port, Packet *p_in)
     if ((ip_p != IP_PROTO_TCP && ip_p != IP_PROTO_UDP && ip_p != IP_PROTO_DCCP)
 	|| !IP_FIRSTFRAG(iph)
 	|| p->transport_length() < 8) {
+	_lock.acquire();
         const IPRewriterInput &is = _input_specs[port];
+	_lock.release();
         if (is.kind == IPRewriterInput::i_nochange)
             return is.foutput;
         else
