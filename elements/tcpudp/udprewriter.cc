@@ -159,6 +159,7 @@ UDPRewriter::process(int port, Packet *p_in)
         else
             return -1;
     }
+
     _lock.acquire();
     IPFlowID flowid(p);
     IPRewriterEntry *m = map().get(flowid);
@@ -169,7 +170,9 @@ UDPRewriter::process(int port, Packet *p_in)
 
         int result = is.rewrite_flowid(flowid, rewritten_flowid, p);
         if (result == rw_addmap) {
+        	_lock.release();
             m = UDPRewriter::add_flow(ip_p, flowid, rewritten_flowid, port);
+            _lock.acquire();
         }
 
         if (!m) {
@@ -187,10 +190,9 @@ UDPRewriter::process(int port, Packet *p_in)
 	mf->change_expiry(heap(), true, now_j + timeouts()[1]);
     else
 	mf->change_expiry(heap(), false, now_j + udp_flow_timeout(mf));
-
-    int nn = m->output();
     _lock.release();
-    return nn;
+
+    return m->output();
 }
 
 void
