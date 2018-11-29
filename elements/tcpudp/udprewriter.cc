@@ -175,11 +175,15 @@ UDPRewriter::process(int port, Packet *p_in)
         }
 
         if (!m) {
+	    _lock.release();
             return result;
         } else if (_annos & 2) {
             m->flowimp()->set_reply_anno(p->anno_u8(_annos >> 2));
         }
     }
+    _lock.release();
+
+    _lock.acquire();
     UDPFlow *mf = static_cast<UDPFlow *>(m->flowimp());
     mf->apply(p, m->direction(), _annos);
 
