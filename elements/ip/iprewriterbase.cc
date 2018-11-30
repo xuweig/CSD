@@ -361,16 +361,13 @@ IPRewriterBase::gc_timer_hook(Timer *t, void *user_data)
     rw->shrink_heap(false);
     if (rw->_gc_interval_sec)
     {
-	_lock.acquire();
     	t->reschedule_after_sec(rw->_gc_interval_sec);
-	_lock.release();
     }
 }
 
 String
 IPRewriterBase::read_handler(Element *e, void *user_data)
 {
-	_lock.acquire();
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(e);
     intptr_t what = reinterpret_cast<intptr_t>(user_data);
     StringAccum sa;
@@ -423,14 +420,12 @@ IPRewriterBase::read_handler(Element *e, void *user_data)
 	}
 	break;
     }
-    _lock.release();
     return sa.take_string();
 }
 
 int
 IPRewriterBase::write_handler(const String &str, Element *e, void *user_data, ErrorHandler *errh)
 {
-	_lock.acquire();
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(e);
     intptr_t what = reinterpret_cast<intptr_t>(user_data);
     if (what == h_capacity) {
@@ -442,15 +437,12 @@ IPRewriterBase::write_handler(const String &str, Element *e, void *user_data, Er
 	    	return -1;
 		}
 	rw->shrink_heap(false);
-	_lock.release();
 	return 0;
     } else if (what == h_clear) {
 	rw->shrink_heap(true);
-	_lock.release();
 	return 0;
     } else
     {
-    	_lock.release();
     	return -1;
     }
 }
@@ -458,7 +450,6 @@ IPRewriterBase::write_handler(const String &str, Element *e, void *user_data, Er
 int
 IPRewriterBase::pattern_write_handler(const String &str, Element *e, void *user_data, ErrorHandler *errh)
 {
-	_lock.acquire();
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(e);
     intptr_t what = reinterpret_cast<intptr_t>(user_data);
     IPRewriterInput is;
@@ -481,7 +472,6 @@ IPRewriterBase::pattern_write_handler(const String &str, Element *e, void *user_
 	    spec->u.pattern->unuse();
 	*spec = is;
     }
-    _lock.release();
     return 0;
 }
 
