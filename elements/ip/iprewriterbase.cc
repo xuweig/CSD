@@ -433,8 +433,7 @@ IPRewriterBase::write_handler(const String &str, Element *e, void *user_data, Er
 	    .read_mp("CAPACITY", rw->_heap->_capacity)
 	    .complete() < 0)
 		{
-			_lock.release();
-	    	return -1;
+	    		return -1;
 		}
 	rw->shrink_heap(false);
 	return 0;
