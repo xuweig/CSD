@@ -230,15 +230,20 @@ IPRewriterBase::cleanup(CleanupStage)
 IPRewriterEntry *
 IPRewriterBase::get_entry(int ip_p, const IPFlowID &flowid, int input)
 {
+	_lock.acquire();
     IPRewriterEntry *m = _map.get(flowid);
     if (m && ip_p && m->flow()->ip_p() && m->flow()->ip_p() != ip_p)
-	return 0;
+    {	
+    	_lock.release();
+    	return 0;
+    }
     if (!m && (unsigned) input < (unsigned) input_specs_size()) {
 	IPRewriterInput &is = input_specs(input);
 	IPFlowID rewritten_flowid = IPFlowID::uninitialized_t();
 	if (is.rewrite_flowid(flowid, rewritten_flowid, 0) == rw_addmap)
 	    m = add_flow(ip_p, flowid, rewritten_flowid, input);
     }
+    _lock.release();
     return m;
 }
 
@@ -251,6 +256,7 @@ IPRewriterBase::store_flow(IPRewriterFlow *flow, int input,
     if ((unsigned) flow->entry(false).output() >= (unsigned) noutputs()
 	|| (unsigned) flow->entry(true).output() >= (unsigned) reply_element->noutputs()) {
 	flow->owner()->owner->destroy_flow(flow);
+	_lock.release();
 	return 0;
     }
 
@@ -282,6 +288,7 @@ IPRewriterBase::store_flow(IPRewriterFlow *flow, int input,
 	       && _heap->size() == _heap->capacity() + 1);
 	if (shrink_heap_for_new_flow(flow, now_j)) {
 	    ++input_specs(input).failures;
+	    _lock.release();
 	    return 0;
 	}
     }
@@ -294,23 +301,25 @@ IPRewriterBase::store_flow(IPRewriterFlow *flow, int input,
     _lock.release();
     return lo;
 }
-
 void
 IPRewriterBase::shift_heap_best_effort(click_jiffies_t now_j)
 {
     // Shift flows with expired guarantees to the best-effort heap.
+	_lock.acquire();
     Vector<IPRewriterFlow *> &guaranteed_heap = _heap->_heaps[1];
     while (guaranteed_heap.size() && guaranteed_heap[0]->expired(now_j)) {
 	IPRewriterFlow *mf = guaranteed_heap[0];
 	click_jiffies_t new_expiry = mf->owner()->owner->best_effort_expiry(mf);
 	mf->change_expiry(_heap, false, new_expiry);
     }
+    _lock.release();
 }
 
 bool
 IPRewriterBase::shrink_heap_for_new_flow(IPRewriterFlow *flow,
 					 click_jiffies_t now_j)
 {
+	_lock.acquire();
     shift_heap_best_effort(now_j);
     // At this point, all flows in the guarantee heap expire in the future.
     // So remove the next-to-expire best-effort flow, unless there are none.
@@ -323,12 +332,14 @@ IPRewriterBase::shrink_heap_for_new_flow(IPRewriterFlow *flow,
     } else
 	deadf = _heap->_heaps[0][0];
     deadf->destroy(_heap);
+    _lock.release();
     return deadf == flow;
 }
 
 void
 IPRewriterBase::shrink_heap(bool clear_all)
 {
+	_lock.acquire();
     click_jiffies_t now_j = click_jiffies();
     shift_heap_best_effort(now_j);
     Vector<IPRewriterFlow *> &best_effort_heap = _heap->_heaps[0];
@@ -340,6 +351,7 @@ IPRewriterBase::shrink_heap(bool clear_all)
 	IPRewriterFlow *deadf = _heap->_heaps[_heap->_heaps[0].empty()][0];
 	deadf->destroy(_heap);
     }
+    _lock.release();
 }
 
 void
@@ -348,12 +360,18 @@ IPRewriterBase::gc_timer_hook(Timer *t, void *user_data)
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(user_data);
     rw->shrink_heap(false);
     if (rw->_gc_interval_sec)
-	t->reschedule_after_sec(rw->_gc_interval_sec);
+    {
+    	
+    	_lock.acquire();
+    	t->reschedule_after_sec(rw->_gc_interval_sec);
+    	_lock.release();
+    }
 }
 
 String
 IPRewriterBase::read_handler(Element *e, void *user_data)
 {
+	_lock.acquire();
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(e);
     intptr_t what = reinterpret_cast<intptr_t>(user_data);
     StringAccum sa;
@@ -406,38 +424,48 @@ IPRewriterBase::read_handler(Element *e, void *user_data)
 	}
 	break;
     }
+    _lock.release();
     return sa.take_string();
 }
 
 int
 IPRewriterBase::write_handler(const String &str, Element *e, void *user_data, ErrorHandler *errh)
 {
+	_lock.acquire();
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(e);
     intptr_t what = reinterpret_cast<intptr_t>(user_data);
     if (what == h_capacity) {
 	if (Args(e, errh).push_back_words(str)
 	    .read_mp("CAPACITY", rw->_heap->_capacity)
 	    .complete() < 0)
-	    return -1;
+		{
+			_lock.release();
+	    	return -1;
+		}
 	rw->shrink_heap(false);
+	_lock.release();
 	return 0;
     } else if (what == h_clear) {
 	rw->shrink_heap(true);
+	_lock.release();
 	return 0;
     } else
-	return -1;
+    {
+    	_lock.release();
+    	return -1;
+    }
 }
 
 int
 IPRewriterBase::pattern_write_handler(const String &str, Element *e, void *user_data, ErrorHandler *errh)
 {
+	_lock.acquire();
     IPRewriterBase *rw = static_cast<IPRewriterBase *>(e);
     intptr_t what = reinterpret_cast<intptr_t>(user_data);
     IPRewriterInput is;
     int r = rw->parse_input_spec(str, is, what, errh);
     if (r >= 0) {
 	IPRewriterInput *spec = &rw->_input_specs[what];
-
 	// remove all existing flows created by this input
 	for (int which_heap = 0; which_heap < 2; ++which_heap) {
 	    Vector<IPRewriterFlow *> &myheap = rw->_heap->_heaps[which_heap];
@@ -454,6 +482,7 @@ IPRewriterBase::pattern_write_handler(const String &str, Element *e, void *user_
 	    spec->u.pattern->unuse();
 	*spec = is;
     }
+    _lock.release();
     return 0;
 }
 
