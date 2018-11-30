@@ -361,7 +361,9 @@ IPRewriterBase::gc_timer_hook(Timer *t, void *user_data)
     rw->shrink_heap(false);
     if (rw->_gc_interval_sec)
     {
+	_lock.acquire();
     	t->reschedule_after_sec(rw->_gc_interval_sec);
+	_lock.release();
     }
 }
 
