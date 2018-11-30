@@ -145,7 +145,7 @@ class IPRewriterBase : public IPRewriterBaseAncestor { public:
     IPRewriterBase() CLICK_COLD;
     ~IPRewriterBase() CLICK_COLD;
     
-    static Spinlock _lock;
+    Spinlock _lock;
 
     int configure(Vector<String> &conf, ErrorHandler *errh) CLICK_COLD;
     int initialize(ErrorHandler *errh) CLICK_COLD;
