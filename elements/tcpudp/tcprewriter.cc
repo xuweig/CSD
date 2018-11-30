@@ -329,6 +329,7 @@ TCPRewriter::process(int port, Packet *p_in)
     }
 
     IPFlowID flowid(p);
+    _lock.acquire();
     IPRewriterEntry *m = map().get(flowid);
 
     if (!m) {			// create new mapping
@@ -341,6 +342,7 @@ TCPRewriter::process(int port, Packet *p_in)
         }
 
 		if (!m) {
+			_lock.release();
 			return result;
 		} else if (_annos & 2) {
 			m->flow()->set_reply_anno(p->anno_u8(_annos >> 2));
@@ -355,7 +357,7 @@ TCPRewriter::process(int port, Packet *p_in)
     	mf->change_expiry(heap(), true, now_j + timeouts()[1]);
     else
     	mf->change_expiry(heap(), false, now_j + tcp_flow_timeout(mf));
-
+    _lock.release();
     return m->output();
 }
 
