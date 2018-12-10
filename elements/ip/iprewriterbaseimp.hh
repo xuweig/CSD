@@ -73,7 +73,6 @@ class IPRewriterBaseIMP : public IPRewriterBaseAncestor { public:
 
     IPRewriterBaseIMP() CLICK_COLD;
     ~IPRewriterBaseIMP() CLICK_COLD;
-    Spinlock _lock;
 
     int configure(Vector<String> &conf, ErrorHandler *errh) override CLICK_COLD;
     int initialize(ErrorHandler *errh) override CLICK_COLD;
