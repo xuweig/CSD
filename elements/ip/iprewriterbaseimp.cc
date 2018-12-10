@@ -258,20 +258,15 @@ IPRewriterBaseIMP::cleanup(CleanupStage)
 IPRewriterEntry *
 IPRewriterBaseIMP::get_entry(int ip_p, const IPFlowID &flowid, int input)
 {
-	_lock.acquire();
     IPRewriterEntry *m = map().get(flowid);
     if (m && ip_p && m->flow()->ip_p() && m->flow()->ip_p() != ip_p)
-    {
-    	_lock.release();
-    	return 0;
-    }
+	return 0;
     if (!m && (unsigned) input < (unsigned) input_specs_size()) {
 	IPRewriterInputIMP &is = input_specs(input);
 	IPFlowID rewritten_flowid = IPFlowID::uninitialized_t();
 	if (is.rewrite_flowid(flowid, rewritten_flowid, 0) == rw_addmap)
 	    m = add_flow(ip_p, flowid, rewritten_flowid, input);
     }
-    _lock.release();
     return m;
 }
 
@@ -279,12 +274,10 @@ IPRewriterEntry *
 IPRewriterBaseIMP::store_flow(IPRewriterFlow *flow, int input,
 			   Map &map, Map *reply_map_ptr)
 {
-	_lock.acquire();
     IPRewriterBaseIMP *reply_element = input_specs(input).reply_element();
     if ((unsigned) flow->entry(false).output() >= (unsigned) noutputs()
 	|| (unsigned) flow->entry(true).output() >= (unsigned) reply_element->noutputs()) {
 	flow->ownerimp()->owner->destroy_flow(flow);
-	_lock.release();
 	return 0;
     }
 
@@ -317,7 +310,6 @@ IPRewriterBaseIMP::store_flow(IPRewriterFlow *flow, int input,
 	       && heap()->size() == heap()->capacity() + 1);
 	if (shrink_heap_for_new_flow(flow, now_j)) {
 	    ++input_specs(input).failures;
-	    _lock.release();
 	    return 0;
 	}
     }
@@ -326,30 +318,25 @@ IPRewriterBaseIMP::store_flow(IPRewriterFlow *flow, int input,
 	map.rehash(map.bucket_count() + 1);
     if (reply_map_ptr != &map && reply_map_ptr->unbalanced())
 	reply_map_ptr->rehash(reply_map_ptr->bucket_count() + 1);
-    IPRewriterEntry *lo = &flow->entry(false);
-    _lock.release();
-    return lo;
+    return &flow->entry(false);
 }
 
 void
 IPRewriterBaseIMP::shift_heap_best_effort(click_jiffies_t now_j)
 {
     // Shift flows with expired guarantees to the best-effort heap.
-	_lock.acquire();
     Vector<IPRewriterFlow *> &guaranteed_heap =heap()->_heaps[1];
     while (guaranteed_heap.size() && guaranteed_heap[0]->expired(now_j)) {
 	IPRewriterFlow *mf = guaranteed_heap[0];
 	click_jiffies_t new_expiry = mf->ownerimp()->owner->best_effort_expiry((IPRewriterFlow*)mf);
 	mf->change_expiry(heap(), false, new_expiry);
     }
-    _lock.release();
 }
 
 bool
 IPRewriterBaseIMP::shrink_heap_for_new_flow(IPRewriterFlow *flow,
 					 click_jiffies_t now_j)
 {
-	_lock.acquire();
     shift_heap_best_effort(now_j);
     // At this point, all flows in the guarantee heap expire in the future.
     // So remove the next-to-expire best-effort flow, unless there are none.
@@ -362,14 +349,12 @@ IPRewriterBaseIMP::shrink_heap_for_new_flow(IPRewriterFlow *flow,
     } else
 	deadf =heap()->_heaps[0][0];
     deadf->destroy(heap());
-    _lock.release();
     return deadf == flow;
 }
 
 void
 IPRewriterBaseIMP::shrink_heap(bool clear_all, int thid)
 {
-	_lock.acquire();
     click_jiffies_t now_j = click_jiffies();
     shift_heap_best_effort(now_j);
     Vector<IPRewriterFlow *> &best_effort_heap = _state.get_value(thid).heap->_heaps[0];
@@ -381,12 +366,10 @@ IPRewriterBaseIMP::shrink_heap(bool clear_all, int thid)
 	IPRewriterFlow *deadf = _state.get_value(thid).heap->_heaps[_state.get_value(thid).heap->_heaps[0].empty()][0];
 	deadf->destroy(_state.get_value(thid).heap);
     }
-    _lock.release();
 }
 
 void
 IPRewriterBaseIMP::dump_mappings(StringAccum& sa) {
-	_lock.acquire();
 	click_jiffies_t now = click_jiffies();
 	for (int i = 0; i < mem_units_no(); i++) {
 		for (Map::iterator iter = _state.get_value(i).map.begin(); iter.live(); ++iter) {
@@ -394,7 +377,6 @@ IPRewriterBaseIMP::dump_mappings(StringAccum& sa) {
 			sa << '\n';
 		}
 	}
-	_lock.release();
 }
 
 void
