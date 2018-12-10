@@ -1,6 +1,6 @@
 #ifndef CLICK_TCPREWRITER_HH
 #define CLICK_TCPREWRITER_HH
-#include "elements/ip/iprewriterbaseimp.hh"
+#include "elements/ip/iprewriterbase.hh"
 #include <clicknet/tcp.h>
 CLICK_DECLS
 
